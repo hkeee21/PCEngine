@@ -17,13 +17,13 @@ __all__ = ['conv3d', 'Conv3d']
 
 
 backend = load(name="convolution_forward_cuda",
-                   sources=["/home/hongke21/nfs/code/TS-Test/backend_EF/pybind_cuda.cpp", 
-                   "/home/hongke21/nfs/code/TS-Test/backend_EF/convolution/convolution_ef.cu"],
+                   sources=["backend/pybind_cuda.cpp", 
+                   "backend/convolution/convolution_ef.cu"],
                    verbose=True)
 
 backend = load(name="convolution_backward_cuda",
-                   sources=["/home/hongke21/nfs/code/TS-Test/backend_EF/pybind_cuda.cpp", 
-                   "/home/hongke21/nfs/code/TS-Test/backend_EF/convolution/convolution_ef.cu"],
+                   sources=["backend_/pybind_cuda.cpp", 
+                   "backend/convolution/convolution_ef.cu"],
                    verbose=True)
                    
 
