@@ -5,7 +5,8 @@ A modified deep learning framework for 3D point clouds.
 torchsparse
 
 ## Baseline Test Results
-# one convolution time (ms)
+one convolution time (ms)
+
 sparsity | nnz | TorchSparse | MinkowskiEngine | Baseline
 ----- ｜ ----- ｜ ----- ｜ ----- ｜ -----
 0.001 ｜ 1000 ｜ 0.4822 ｜ 0.1002 ｜ 0.9335
