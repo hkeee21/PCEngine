@@ -1,12 +1,21 @@
 #include "spconv.h"
 
+#include <ATen/ATen.h>
+#include <ATen/cuda/CUDAContext.h>
+
 #include <math.h>
 #include <stdio.h>
 #include <cuda_runtime.h>
+#include <cuda.h>
 #include <stdlib.h>
 
 using namespace std;
+#define XOFFSET 0
+#define YOFFSET 1
+#define ZOFFSET 2
 #define BLOCK_SIZE 32
+
+extern "C"
 
 #define checkCudaError( a ) do { \
     if (cudaSuccess != (a)) { \
@@ -49,151 +58,231 @@ void coordInit(int *coord, int n)
 }
 
 
-int main(void){
+__device__ bool search_axis(const int *coord, int *range, const int value, const int ao)
+{    
+    int start = range[0];
+    int end = range[1];
+    int mid = (start + end) / 2;
+    while(coord[mid * 3 + ao] != value){
+        //printf("start:%d, end:%d, mid:%d\n", start, end, mid);
+        if (mid == start){
+            if (coord[end * 3 + ao] == value){
+                start = start + 1; range[0] = start; range[1] = end; return 1;}
+            else if (coord[start * 3 + ao] == value){
+                end = end - 1; range[0] = start; range[1] = end; return 1;}
+            return 0;
+        }
+        if (coord[mid * 3 + ao] < value){
+            start = mid;
+            mid = (int)((start + end) / 2);
+        }
+        else{
+            end = mid;
+            mid = (int)((start + end) / 2);
+        }
+    }
+    // TODO: The case with one target saves the following computation  
+    int start_temp = start;
+    int end_temp = end;
+    while(coord[end * 3 + ao] > value){
+        end = (int)((end + mid) / 2);
+    }
+    while(coord[end * 3 + ao] == value && end <= end_temp){
+        end = end + 1;
+    }
+    end = end - 1;
 
-    printf("[SubmanifoldSparseConv] - Starting...\n");
+    while(coord[start * 3 + ao] < value){
+        start = ceil(float((start + mid)) / 2);
+    }
+    while(coord[start * 3 + ao] == value && start >= start_temp){
+        start = start - 1;
+    }
+    start = start + 1;
+    range[0] = start;
+    range[1] = end;
+    return 1;
+}
 
-    int nnz = 32;
-    int in_channel = 3;
-    int out_channel = 3;
-    int k_size = 3;
+
+__global__ void search(const int nnz, const int c_in, const int c_out,
+                        const int *__restrict__ coord, const int kx, const int ky, const int kz, 
+                        int *map)
+{   
+    int id = blockIdx.x * blockDim.x + threadIdx.x;  // a thread for a coord
+    // initialize ... 
+    map[id] = -1;
+    while(id < nnz)
+    {
+        int Ix = coord[id * 3] + kx;
+        int Iy = coord[id * 3 + 1] + ky;
+        int Iz = coord[id * 3 + 2] + kz;
+
+        if (Ix >= 0 && Iy >= 0 && Iz >= 0){
+        // printf("Searching for coord (%d,%d,%d)\n", Ix, Iy, Iz);
+        // search the corresponding input coord
+        int range[2];
+        range[0] = 0;
+        range[1] = nnz - 1;
+
+        while(range[0] < range[1]){
+            // search for x
+            if (search_axis(coord, range, Ix, XOFFSET) == 0){
+                break;
+            }
+        
+            // search for y
+            if (search_axis(coord, range, Iy, YOFFSET) == 0){
+                break;
+            }
+        
+            // search for z
+            if (search_axis(coord, range, Iz, ZOFFSET) == 1){
+                if (range[0] == range[1]){
+                    // printf("Input Z[%d] found. Final Found.\n", range[0]);
+                    map[id] = range[0];
+                    //atomicAdd(&map[id], z_start + 1);
+                    break;
+                }
+                else{
+                    // TODO: Methods settling for coord repetition
+                    map[id] = range[0];
+                    // printf("Same coord appears twice, only one is used.\n");
+                    break;
+                }
+            }
+            else {
+                break;
+            }
+        }
+        //printf("Map[%d] derived.\n", id);
+        }
+        id += blockDim.x * gridDim.x;
+    }
+}
+
+
+__global__ void gemm(const int nnz, const int c_in, const int c_out,
+                const float *__restrict__ in_f, const float *__restrict__ kv, float *out_f,
+                const int *map) {
+
+  // Block index
+  const int bx = blockIdx.x;
+  const int by = blockIdx.y;
+
+  // Thread index
+  const int tx = threadIdx.x;
+  const int ty = threadIdx.y;
+
+  // Coordinate. x is for rows, y is for columns.
+  const int x = BLOCK_SIZE * bx + tx;
+  const int y = BLOCK_SIZE * by + ty;
+
+  // The thread deals with the x-th channel of the y-th output
+  const int in_row = y < nnz ? map[y] : -1;
+
+  // Csub is used to store the element of the block sub-matrix
+  // that is computed by the thread
+  float Csub = 0;
+  
+  // Loop over all the sub-matrices of A and B
+  // required to compute the block sub-matrix
+  for (int s = 0; s < c_in; s += BLOCK_SIZE) {
+    // Declaration of the shared memory array As used to
+    // store the sub-matrix of A
+    __shared__ float As[BLOCK_SIZE][BLOCK_SIZE];
+
+    // Declaration of the shared memory array Bs used to
+    // store the sub-matrix of B
+    __shared__ float Bs[BLOCK_SIZE][BLOCK_SIZE];
+
+    // Load the matrices from device memory
+    // to shared memory; each thread loads
+    // one element of each matrix
+    As[ty][tx] = ((s + tx) < c_in && y < nnz && in_row != -1) ? in_f[c_in * in_row + s + tx] : 0;
+    Bs[ty][tx] = ((s + ty) < c_in && x < c_out) ? kv[c_out * (s + ty) + x] : 0;
+
+    // Synchronize to make sure the matrices are loaded
+    __syncthreads();
+
+    // Multiply the two matrices together;
+    // each thread computes one element
+    // of the block sub-matrix
+#pragma unroll
+    for (int k = 0; k < BLOCK_SIZE; ++k) {
+      Csub += As[ty][k] * Bs[k][tx];
+    }
+
+    // Synchronize to make sure that the preceding
+    // computation is done before loading two new
+    // sub-matrices of A and B in the next iteration
+    __syncthreads();
+  }
+
+  // Write the block sub-matrix to device memory;
+  // each thread writes one element
+  if (y < nnz && x < c_out)
+    atomicAdd(&out_f[c_out * y + x], Csub);
+  // C[wB * out_row + x] += Csub;
+}
+
+
+void ConvolutionForward(at::Tensor in_coords, at::Tensor in_feats, 
+                            at::Tensor kernel, const int k_size, 
+                            at::Tensor in_map, at::Tensor out_feats
+                            ){
+    
+    // printf("[SubmanifoldSparseConv] - Starts.\n");
+
+    int nnz = in_coords.size(0);
+    int in_channel = in_feats.size(1);
+    if (in_feats.size(1) != kernel.size(1)) {
+        throw std::invalid_argument("Input feature size and kernel size mismatch");
+    }
+    int out_channel = kernel.size(2);
     int k_vol = k_size * k_size * k_size;
 
     size_t const blocknum = (nnz + BLOCK_SIZE  - 1) / BLOCK_SIZE;
     size_t const gridnum = nnz > out_channel ? (nnz + BLOCK_SIZE - 1) / BLOCK_SIZE : (out_channel + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-    // initialize weights and inputs
-    printf("Initialize the weights and inputs ...\n");
-    float *weights = (float *)malloc(k_vol * in_channel * out_channel * sizeof(float));
-    randomInit(weights, k_vol * in_channel * out_channel);
+    float *in_feats_ptr = in_feats.data_ptr<float>();
+    float *weight_ptr = kernel.data_ptr<float>();
+    float *out_feats_ptr = out_feats.data_ptr<float>();
+    int *in_coords_ptr = in_coords.data_ptr<int>();
+    int *in_map_ptr = in_map.data_ptr<int>();
 
-    float *in_feats = (float *)malloc(nnz * in_channel * sizeof(float));
-    randomInit(in_feats, nnz * in_channel);
-    
-    /*for (int i = 0; i < nnz ; i++){
-        printf("[%.4f,%.4f,%.4f]\n", in_feats[3 * i], in_feats[3 * i + 1], in_feats[3 * i + 2]);
-    }*/
-
-    int *in_coords = (int *)malloc(nnz * 3 * sizeof(int));
-    coordInit(in_coords, nnz);
-
-    /*for (int i = 0; i < nnz ; i++){
-        printf("[%d,%d,%d]\n", in_coords[3 * i], in_coords[3 * i + 1], in_coords[3 * i + 2]);
-    }*/
-
-    // allocate memory for outputs
-    float *out_feats = (float *)malloc(nnz * out_channel * sizeof(float));
-
-    float *out_cpu = (float *)malloc(nnz * out_channel * sizeof(float));
-
-    float *out_gemm_cpu = (float *)malloc(nnz * out_channel * sizeof(float));
-
-    // CPU Conv
-    Conv_CPU(nnz, in_channel, out_channel, in_coords, in_feats, weights, k_size, out_cpu);
-    
-    /*for (int i = 0; i < nnz ; i++){
-        printf("[%.4f,%.4f,%.4f]\n", out_cpu[3 * i], out_cpu[3 * i + 1], out_cpu[3 * i + 2]);
-    }*/
-
-    // GPU memory
-    float *dev_weights, *dev_infeats, *dev_outfeats;
-    int *dev_incoords;
-    int *dev_inmap;
-    
-    int *in_map = (int *)malloc(nnz * sizeof(int));
-    int *map_cpu = (int *)malloc(nnz * sizeof(int));
-
-    // TODO: move the mem allocation of weights into the iteration
-    checkCudaError(cudaMalloc((void **)&dev_weights, k_vol * in_channel * out_channel * sizeof(float)));
-    checkCudaError(cudaMalloc((void **)&dev_infeats, nnz * in_channel * sizeof(float)));
-    checkCudaError(cudaMalloc((void **)&dev_outfeats, nnz * out_channel * sizeof(float)));
-
-    checkCudaError(cudaMalloc((void **)&dev_incoords, nnz * 3 * sizeof(int)));
-    checkCudaError(cudaMalloc((void **)&dev_inmap, nnz * sizeof(int)));
-
-    checkCudaError(cudaMemcpy(dev_weights, weights, k_vol * in_channel * out_channel * sizeof(float), cudaMemcpyHostToDevice));
-    checkCudaError(cudaMemcpy(dev_infeats, in_feats, nnz * in_channel * sizeof(float), cudaMemcpyHostToDevice));
-    checkCudaError(cudaMemcpy(dev_incoords, in_coords, nnz * 3 * sizeof(int), cudaMemcpyHostToDevice));
-    checkCudaError(cudaMemset(dev_outfeats, 0, nnz * out_channel * sizeof(float)));
-
-    // GPU Conv
+    // Suppose an odd kernel size
     for (int i = 0; i < k_vol; i++){
 
-        checkCudaError(cudaMemset(dev_inmap, -1, nnz * sizeof(int)));
-        // checkCudaError(cudaMemcpy(map_cpu, in_map, nnz * sizeof(int), cudaMemcpyDeviceToHost));
-        memset(map_cpu, -1, nnz * sizeof(int));
-        /*for (int j = 0; j < nnz ; j++){
-            printf("%d\n", map_cpu[j]);
-        }*/
-
+        // calculate the kernel offset
         int k_offset_x = i / (k_size * k_size) - (k_size - 1) / 2;
         int k_offset_y = (i / k_size) % k_size - (k_size - 1) / 2;
         int k_offset_z = i % k_size - (k_size - 1) / 2;
-
-        printf("Handling the %d-th kernel offset ...\n", i+1);
-        printf("The offset is (%d, %d, %d).\n", k_offset_x, k_offset_y, k_offset_z);
-
+    
+        // search the nnz involved and record the mapping
         search<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
                 nnz, 
                 in_channel, out_channel,
-                dev_incoords, 
+                in_coords_ptr, 
                 k_offset_x, k_offset_y, k_offset_z, 
-                dev_inmap);
-
-        // search_CPU(nnz, in_channel, out_channel, in_coords, k_offset_x, k_offset_y, k_offset_z, map_cpu);
-        /*for (int j = 0; j < nnz ; j++){
-             printf("%d\n", map_cpu[j]);
-        }*/
-
-        printf("Map search is done.\n");
-        checkCudaError(cudaMemcpy(in_map, dev_inmap, nnz * sizeof(int), cudaMemcpyDeviceToHost));
-        // for (int j = 0; j < nnz ; j++){
-        //      printf("%d - %d\n", in_map[j], j);
-        // }
+                in_map_ptr);
         
+        // GEMM
         gemm<<<dim3(gridnum, gridnum, 1), dim3(BLOCK_SIZE, BLOCK_SIZE, 1)>>>(
                 nnz, 
                 in_channel, out_channel,
-                dev_infeats,
-                &dev_weights[i * in_channel * out_channel],
-                dev_outfeats,
-                dev_inmap);
-        
-        printf("GEMM is done.\n");
-
-        gemm_cpu(nnz, in_channel, out_channel, in_feats, &weights[i * in_channel * out_channel], in_map, out_gemm_cpu);
-
-    }
-    printf("All computation is done.\n");
-
-    checkCudaError(cudaMemcpy(out_feats, dev_outfeats, nnz * out_channel * sizeof(float), cudaMemcpyDeviceToHost));
-    printf("Output is copied.\n");
-
-    // Compare with CPU results
-    for (int i = 0; i < nnz ; i++){
-        printf("[%.4f,%.4f,%.4f] - [%.4f,%.4f,%.4f] - [%.4f,%.4f,%.4f]\n", 
-        out_cpu[3 * i], out_cpu[3 * i + 1], out_cpu[3 * i + 2],
-        out_feats[3 * i], out_feats[3 * i + 1], out_feats[3 * i + 2], 
-        out_gemm_cpu[3 * i], out_gemm_cpu[3 * i + 1], out_gemm_cpu[3 * i + 2]);
-    }
+                in_feats_ptr,
+                &weight_ptr[i * in_channel * out_channel],
+                out_feats_ptr,
+                in_map_ptr);
     
+    }
+
+    // printf("[SubmanifoldSparseConv] - Ends.\n");
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess){
         printf("CUDA Error: %s\n", cudaGetErrorString(err));
     }
 
-    free(weights);
-    free(in_feats);
-    free(in_coords);
-    free(out_feats);
-    free(map_cpu);
-    free(in_map);
-    checkCudaError(cudaFree(dev_weights));
-    checkCudaError(cudaFree(dev_infeats));
-    checkCudaError(cudaFree(dev_incoords));
-    checkCudaError(cudaFree(dev_outfeats));
-    checkCudaError(cudaFree(dev_inmap));
-
-    return 0;
 }
