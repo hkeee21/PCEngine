@@ -25,38 +25,6 @@ extern "C"
     } \
 } while(0)
 
-void randomInit(float *data, int size)
-{
-    float density = 1;
-    float s = 1/density;
-    int ss = s;
-    for (int i = 0; i < size; ++i)
-    {
-        if((int)rand()%ss == 0)
-        {
-            data[i] = rand() / (float)RAND_MAX;
-        }
-        else
-            data[i] = 0;
-    }
-}
-
-
-void coordInit(int *coord, int n)
-{
-    int Vx = 0;
-    int Vy = 0;
-    int Vz = 0;
-    for (int i = 0; i < n; i++){
-        coord[3*i] = Vx;
-        coord[3*i+1] = Vy;
-        coord[3*i+2] = Vz;
-        if(i % 10 == 0){Vx = Vx + 3; Vy = 0; Vz = 0;}
-        if(i % 5 == 4){Vy = Vy + 2; Vz = 0;}
-        Vz = Vz + 1;
-    }
-}
-
 
 __device__ bool search_axis(const int *coord, int *range, const int value, const int ao)
 {    
@@ -105,18 +73,40 @@ __device__ bool search_axis(const int *coord, int *range, const int value, const
 }
 
 
-__global__ void search(const int nnz, const int c_in, const int c_out,
-                        const int *__restrict__ coord, const int kx, const int ky, const int kz, 
-                        int *map)
+__global__ void center_map(const int nnz, int *map)
+{
+    int id = blockIdx.x * blockDim.x + threadIdx.x;  // a thread for a coord
+    while(id < nnz)
+    {
+        map[2 * id] = id;
+        map[2 * id + 1] = id;
+        id += blockDim.x * gridDim.x;
+    }
+
+}
+
+
+__global__ void search(const int nnz, const int *__restrict__ coord, 
+                    const int ks, const int kx, const int ky, const int kz, int *map)
 {   
     int id = blockIdx.x * blockDim.x + threadIdx.x;  // a thread for a coord
-    // initialize ... 
-    map[id] = -1;
+    
     while(id < nnz)
     {
         int Ix = coord[id * 3] + kx;
         int Iy = coord[id * 3 + 1] + ky;
         int Iz = coord[id * 3 + 2] + kz;
+
+        /*if (kz > - ks / 2 && map[id] > -1){
+            // use the existing mapping
+            map[id] = coord[3 * (map[id] + 1) + 2] == Iz ? map[id] + 1 : -1;
+            id += blockDim.x * gridDim.x;
+            continue;
+        }*/
+
+        // initialize the mapping ...
+        map[2 * id] = -1;
+        map[2 * id + 1] = -1;
 
         if (Ix >= 0 && Iy >= 0 && Iz >= 0){
         // printf("Searching for coord (%d,%d,%d)\n", Ix, Iy, Iz);
@@ -140,13 +130,12 @@ __global__ void search(const int nnz, const int c_in, const int c_out,
             if (search_axis(coord, range, Iz, ZOFFSET) == 1){
                 if (range[0] == range[1]){
                     // printf("Input Z[%d] found. Final Found.\n", range[0]);
-                    map[id] = range[0];
-                    //atomicAdd(&map[id], z_start + 1);
+                    map[2 * id] = range[0];
                     break;
                 }
                 else{
                     // TODO: Methods settling for coord repetition
-                    map[id] = range[0];
+                    map[2 * id] = range[0];
                     // printf("Same coord appears twice, only one is used.\n");
                     break;
                 }
@@ -156,6 +145,30 @@ __global__ void search(const int nnz, const int c_in, const int c_out,
             }
         }
         //printf("Map[%d] derived.\n", id);
+        }
+        id += blockDim.x * gridDim.x;
+    }
+}
+
+
+__global__ void query(const int nnz, int *map){
+
+    int id = blockIdx.x * blockDim.x + threadIdx.x;
+    while(id < nnz)
+    {
+        int count = 0;
+        int temp_map = map[2 * id];
+
+        for(int i = 0; i < id; i++){
+            if(map[2 * i] > -1){count += 1;}
+        }
+
+        __syncthreads();
+
+        if (map[2 * id] > -1){
+
+            map[2 * count + 1] = id;
+            map[2 * count] = temp_map;
         }
         id += blockDim.x * gridDim.x;
     }
@@ -179,8 +192,10 @@ __global__ void gemm(const int nnz, const int c_in, const int c_out,
   const int y = BLOCK_SIZE * by + ty;
 
   // The thread deals with the x-th channel of the y-th output
-  const int in_row = y < nnz ? map[y] : -1;
+  const int in_row = y < nnz ? map[2 * y] : -1;
+  const int out_row = y < nnz ? map[2 * y + 1] : -1;
 
+  if(in_row > -1 && out_row > -1){
   // Csub is used to store the element of the block sub-matrix
   // that is computed by the thread
   float Csub = 0;
@@ -199,7 +214,7 @@ __global__ void gemm(const int nnz, const int c_in, const int c_out,
     // Load the matrices from device memory
     // to shared memory; each thread loads
     // one element of each matrix
-    As[ty][tx] = ((s + tx) < c_in && y < nnz && in_row != -1) ? in_f[c_in * in_row + s + tx] : 0;
+    As[ty][tx] = ((s + tx) < c_in && in_row < nnz) ? in_f[c_in * in_row + s + tx] : 0;
     Bs[ty][tx] = ((s + ty) < c_in && x < c_out) ? kv[c_out * (s + ty) + x] : 0;
 
     // Synchronize to make sure the matrices are loaded
@@ -221,9 +236,10 @@ __global__ void gemm(const int nnz, const int c_in, const int c_out,
 
   // Write the block sub-matrix to device memory;
   // each thread writes one element
-  if (y < nnz && x < c_out)
-    atomicAdd(&out_f[c_out * y + x], Csub);
+  if (out_row < nnz && x < c_out)
+    atomicAdd(&out_f[c_out * out_row + x], Csub);
   // C[wB * out_row + x] += Csub;
+  }
 }
 
 
@@ -258,14 +274,22 @@ void ConvolutionForward(at::Tensor in_coords, at::Tensor in_feats,
         int k_offset_x = i / (k_size * k_size) - (k_size - 1) / 2;
         int k_offset_y = (i / k_size) % k_size - (k_size - 1) / 2;
         int k_offset_z = i % k_size - (k_size - 1) / 2;
-    
+
         // search the nnz involved and record the mapping
-        search<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
+        // kernel offset (0, 0, 0) need no mapping calculation
+        if (k_offset_x == 0 && k_offset_y == 0 && k_offset_z == 0){
+            center_map<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(nnz, in_map_ptr);
+        }
+        else{
+            search<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
                 nnz, 
-                in_channel, out_channel,
                 in_coords_ptr, 
+                k_size, 
                 k_offset_x, k_offset_y, k_offset_z, 
                 in_map_ptr);
+        }
+
+        query<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(nnz, in_map_ptr);
         
         // GEMM
         gemm<<<dim3(gridnum, gridnum, 1), dim3(BLOCK_SIZE, BLOCK_SIZE, 1)>>>(
