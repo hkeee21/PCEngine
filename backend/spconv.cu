@@ -287,9 +287,9 @@ void ConvolutionForward(at::Tensor in_coords, at::Tensor in_feats,
                 k_size, 
                 k_offset_x, k_offset_y, k_offset_z, 
                 in_map_ptr);
+            
+            query<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(nnz, in_map_ptr);
         }
-
-        query<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(nnz, in_map_ptr);
         
         // GEMM
         gemm<<<dim3(gridnum, gridnum, 1), dim3(BLOCK_SIZE, BLOCK_SIZE, 1)>>>(
