@@ -8,6 +8,7 @@
 #include <cuda_runtime.h>
 #include <cuda.h>
 #include <stdlib.h>
+#include <torch/extension.h>
 
 using namespace std;
 #define XOFFSET 0
@@ -78,8 +79,8 @@ __global__ void center_map(const int nnz, int *map)
     int id = blockIdx.x * blockDim.x + threadIdx.x;  // a thread for a coord
     while(id < nnz)
     {
-        map[2 * id] = id;
-        map[2 * id + 1] = id;
+        map[id] = id;
+
         id += blockDim.x * gridDim.x;
     }
 
@@ -105,8 +106,9 @@ __global__ void search(const int nnz, const int *__restrict__ coord,
         }*/
 
         // initialize the mapping ...
-        map[2 * id] = -1;
-        map[2 * id + 1] = -1;
+        map[id] = -1;
+        
+        __syncthreads();
 
         if (Ix >= 0 && Iy >= 0 && Iz >= 0){
         // printf("Searching for coord (%d,%d,%d)\n", Ix, Iy, Iz);
@@ -130,12 +132,12 @@ __global__ void search(const int nnz, const int *__restrict__ coord,
             if (search_axis(coord, range, Iz, ZOFFSET) == 1){
                 if (range[0] == range[1]){
                     // printf("Input Z[%d] found. Final Found.\n", range[0]);
-                    map[2 * id] = range[0];
+                    map[id] = range[0];
                     break;
                 }
                 else{
-                    // TODO: Methods settling for coord repetition
-                    map[2 * id] = range[0];
+                    // TODO: Methods dealing with coord repetition
+                    map[id] = range[0];
                     // printf("Same coord appears twice, only one is used.\n");
                     break;
                 }
@@ -175,9 +177,9 @@ __global__ void query(const int nnz, int *map){
 }
 
 
-__global__ void gemm(const int nnz, const int c_in, const int c_out,
+__global__ void gemm(const int nnz, const int kernel_nnz, const int c_in, const int c_out,
                 const float *__restrict__ in_f, const float *__restrict__ kv, float *out_f,
-                const int *map) {
+                const long *nnz_idx, const int *map) {
 
   // Block index
   const int bx = blockIdx.x;
@@ -192,8 +194,8 @@ __global__ void gemm(const int nnz, const int c_in, const int c_out,
   const int y = BLOCK_SIZE * by + ty;
 
   // The thread deals with the x-th channel of the y-th output
-  const int in_row = y < nnz ? map[2 * y] : -1;
-  const int out_row = y < nnz ? map[2 * y + 1] : -1;
+  const int out_row = y < kernel_nnz ? nnz_idx[y] : -1;
+  const int in_row = y < kernel_nnz ? map[out_row] : -1;
 
   if(in_row > -1 && out_row > -1){
   // Csub is used to store the element of the block sub-matrix
@@ -259,7 +261,6 @@ void ConvolutionForward(at::Tensor in_coords, at::Tensor in_feats,
     int k_vol = k_size * k_size * k_size;
 
     size_t const blocknum = (nnz + BLOCK_SIZE  - 1) / BLOCK_SIZE;
-    size_t const gridnum = nnz > out_channel ? (nnz + BLOCK_SIZE - 1) / BLOCK_SIZE : (out_channel + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
     float *in_feats_ptr = in_feats.data_ptr<float>();
     float *weight_ptr = kernel.data_ptr<float>();
@@ -277,6 +278,7 @@ void ConvolutionForward(at::Tensor in_coords, at::Tensor in_feats,
 
         // search the nnz involved and record the mapping
         // kernel offset (0, 0, 0) need no mapping calculation
+
         if (k_offset_x == 0 && k_offset_y == 0 && k_offset_z == 0){
             center_map<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(nnz, in_map_ptr);
         }
@@ -288,16 +290,23 @@ void ConvolutionForward(at::Tensor in_coords, at::Tensor in_feats,
                 k_offset_x, k_offset_y, k_offset_z, 
                 in_map_ptr);
             
-            query<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(nnz, in_map_ptr);
+        // query<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(nnz, in_map_ptr);
         }
         
+        auto nnz_idx = torch::nonzero(in_map + torch::ones_like(in_map));  // torch::nonzero returns long tensor
+        int kernel_nnz = nnz_idx.size(0);
+
+        size_t const gridnum = kernel_nnz > out_channel ? (kernel_nnz + BLOCK_SIZE - 1) / BLOCK_SIZE : (out_channel + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
         // GEMM
         gemm<<<dim3(gridnum, gridnum, 1), dim3(BLOCK_SIZE, BLOCK_SIZE, 1)>>>(
                 nnz, 
+                kernel_nnz, 
                 in_channel, out_channel,
                 in_feats_ptr,
                 &weight_ptr[i * in_channel * out_channel],
                 out_feats_ptr,
+                nnz_idx.data_ptr<long>(), 
                 in_map_ptr);
     
     }

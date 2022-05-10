@@ -75,7 +75,7 @@ if __name__ == '__main__':
 
     # map and output, for mem allocation observation
     output = torch.zeros((input_nnz, output_channel), dtype=torch.float).to(device)
-    map = torch.zeros((input_nnz, 2), dtype=torch.int).to(device)
+    map = torch.zeros((input_nnz,), dtype=torch.int).to(device)
 
     for _ in range(3):
         with torch.no_grad(): 
