@@ -296,10 +296,13 @@ void ConvolutionForward(at::Tensor in_coords, at::Tensor in_feats,
         auto nnz_idx = torch::nonzero(in_map + torch::ones_like(in_map));  // torch::nonzero returns long tensor
         int kernel_nnz = nnz_idx.size(0);
 
-        size_t const gridnum = kernel_nnz > out_channel ? (kernel_nnz + BLOCK_SIZE - 1) / BLOCK_SIZE : (out_channel + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        if (kernel_nnz == 0){continue;}
+
+        size_t const gridnum_x = (out_channel + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        size_t const gridnum_y = (kernel_nnz + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
         // GEMM
-        gemm<<<dim3(gridnum, gridnum, 1), dim3(BLOCK_SIZE, BLOCK_SIZE, 1)>>>(
+        gemm<<<dim3(gridnum_x, gridnum_y, 1), dim3(BLOCK_SIZE, BLOCK_SIZE, 1)>>>(
                 nnz, 
                 kernel_nnz, 
                 in_channel, out_channel,
