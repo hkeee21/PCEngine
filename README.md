@@ -7,7 +7,7 @@ torchsparse
 ## Baseline Test Results
 one convolution time (ms)
 
-| sparsity | nnz | TorchSparse | MinkowskiEngine | Baseline-3 |
+| sparsity | nnz | TorchSparse | MinkowskiEngine | Baseline-4 |
 | ----- | ----- | ----- | ----- | ----- |
 | 0.002 | 2000 | 0.5811 | 0.1156 | 1.9221 |
 | 0.004 | 4000 | 0.6093 | 0.1231 | 2.1581 |
