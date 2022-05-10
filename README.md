@@ -8,6 +8,7 @@ torchsparse
 
 ## Baseline Test Results
 one convolution time (ms)
+
 random data:
 | sparsity | nnz | TorchSparse | MinkowskiEngine | Baseline-4 |
 | ----- | ----- | ----- | ----- | ----- |
