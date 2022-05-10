@@ -5,35 +5,29 @@ from itertools import repeat
 import time
 from torch.utils.cpp_extension import load
 from torchsparse.utils.quantize import sparse_quantize
-import open3d as o3d
+from utils import sparse_quantize, load_file
 
 backend = load(name="conv_fwd_cuda",
                    sources=["/home/hongke21/nfs/code/spconv/Sparse_Conv/backend/pybind_cuda.cpp", 
                    "/home/hongke21/nfs/code/spconv/Sparse_Conv/backend/spconv.cu"],
                    verbose=True)
 
-'''cuda_module = load(name="tag_profiling",
+'''
+cuda_module = load(name="tag_profiling",
                    sources=["/home/hongke21/nfs/code/tag_profiling.cpp", "/home/hongke21/nfs/code/tag_profiling.cu"],
                    verbose=True)'''
-
-
-def load_file(file_name):
-    pcd = o3d.io.read_point_cloud(file_name)
-    coords = np.array(pcd.points)
-    colors = np.array(pcd.colors)
-    return coords, colors, pcd
 
 
 if __name__ == '__main__': 
     device = torch.device('cuda')
 
-    iter_num = 200
+    iter_num = 10
     
-    
+    '''
     # To generate the inputs (COO + feats)
     # Here input size denotes the number of input nnz. 
     # Currently only odd kernel size is considered
-    input_size, input_channel, kernel_size = 10000, 3, 3
+    input_size, input_channel, kernel_size = 20000, 3, 3
     voxel_size = 0.1
 
     
@@ -66,7 +60,7 @@ if __name__ == '__main__':
     input_nnz = coord.shape[0]
     coords = torch.tensor(coord, dtype=torch.int).to(device)
     feats = torch.tensor(colors[indices], dtype=torch.float).to(device)
-    '''
+    
 
     # To generate the weights
     output_channel = 64
@@ -88,11 +82,12 @@ if __name__ == '__main__':
                 output
         )
     
-    torch.cuda.synchronize(device)
+    torch.cuda.synchronize()
     start=time.time()
 
-    # cuda_module.torch_launch_tag_profiling()
     for _ in range(iter_num):
+        # cuda_module.torch_launch_tag_profiling()
+
         with torch.no_grad(): 
             backend.conv_fwd_cuda(
                 coords,
@@ -102,10 +97,11 @@ if __name__ == '__main__':
                 map,
                 output
         )
+
+        # cuda_module.torch_launch_tag_profiling()
     
-    # cuda_module.torch_launch_tag_profiling()
     
-    torch.cuda.synchronize(device)
+    torch.cuda.synchronize()
     end=time.time()
     inf_time=(end-start)/iter_num
 
