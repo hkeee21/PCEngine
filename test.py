@@ -8,20 +8,14 @@ from torchsparse.utils.quantize import sparse_quantize
 from utils import sparse_quantize, load_file
 
 backend = load(name="conv_fwd_cuda",
-                   sources=["/home/hongke21/nfs/code/spconv/Sparse_Conv/backend/pybind_cuda.cpp", 
-                   "/home/hongke21/nfs/code/spconv/Sparse_Conv/backend/spconv.cu"],
+                   sources=["backend/pybind_cuda.cpp", 
+                   "backend/spconv.cu"],
                    verbose=True)
-
-'''
-cuda_module = load(name="tag_profiling",
-                   sources=["/home/hongke21/nfs/code/tag_profiling.cpp", "/home/hongke21/nfs/code/tag_profiling.cu"],
-                   verbose=True)'''
-
 
 if __name__ == '__main__': 
     device = torch.device('cuda')
 
-    iter_num = 10
+    iter_num = 100
     
     '''
     # To generate the inputs (COO + feats)
@@ -53,7 +47,7 @@ if __name__ == '__main__':
     # real data test
     input_channel, kernel_size = 3, 3
 
-    coord, colors, pcd = load_file("/home/hongke21/nfs/MinkowskiEngine/MinkowskiEngine/examples/1.ply")
+    coord, colors, pcd = load_file("data/1.ply")
     coord -= np.min(coord, axis=0, keepdims=True)
     voxel_size = 0.02
     coord, indices = sparse_quantize(coord, voxel_size, return_index=True)
@@ -86,7 +80,6 @@ if __name__ == '__main__':
     start=time.time()
 
     for _ in range(iter_num):
-        # cuda_module.torch_launch_tag_profiling()
 
         with torch.no_grad(): 
             backend.conv_fwd_cuda(
@@ -97,8 +90,6 @@ if __name__ == '__main__':
                 map,
                 output
         )
-
-        # cuda_module.torch_launch_tag_profiling()
     
     
     torch.cuda.synchronize()

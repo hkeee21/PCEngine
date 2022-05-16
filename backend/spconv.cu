@@ -15,6 +15,7 @@ using namespace std;
 #define YOFFSET 1
 #define ZOFFSET 2
 #define BLOCK_SIZE 32
+#define COLLISION_BOUND 20
 
 extern "C"
 
@@ -27,50 +28,80 @@ extern "C"
 } while(0)
 
 
-__device__ bool search_axis(const int *coord, int *range, const int value, const int ao)
-{    
-    int start = range[0];
-    int end = range[1];
-    int mid = (start + end) / 2;
-    while(coord[mid * 3 + ao] != value){
-        //printf("start:%d, end:%d, mid:%d\n", start, end, mid);
-        if (mid == start){
-            if (coord[end * 3 + ao] == value){
-                start = start + 1; range[0] = start; range[1] = end; return 1;}
-            else if (coord[start * 3 + ao] == value){
-                end = end - 1; range[0] = start; range[1] = end; return 1;}
-            return 0;
-        }
-        if (coord[mid * 3 + ao] < value){
-            start = mid;
-            mid = (int)((start + end) / 2);
-        }
-        else{
-            end = mid;
-            mid = (int)((start + end) / 2);
-        }
-    }
-    // TODO: The case with one target saves the following computation  
-    int start_temp = start;
-    int end_temp = end;
-    while(coord[end * 3 + ao] > value){
-        end = (int)((end + mid) / 2);
-    }
-    while(coord[end * 3 + ao] == value && end <= end_temp){
-        end = end + 1;
-    }
-    end = end - 1;
+inline __device__ uint64_t coord_hash(const int ix, const int iy, const int iz){
+    // +1 to avoid val==0
+    return ((uint64_t)ix * 73856093 + (uint64_t)iy * 19349669 + (uint64_t)iz * 83492791 + 1);
+}
 
-    while(coord[start * 3 + ao] < value){
-        start = ceil(float((start + mid)) / 2);
+inline __device__ uint64_t shift_hash(const int size, const uint64_t value){
+    return ((value + 1) % ((uint64_t)size - 2));
+}
+
+
+__global__ void insertHash(const int nnz, const int size, const int *__restrict__ coord, int *idx){
+    
+    int id = blockIdx.x * blockDim.x + threadIdx.x;
+    // exclude illegal id number
+    if (id < nnz){
+        
+        uint64_t temp_val = coord_hash(coord[3 * id], coord[3 * id + 1], coord[3 * id + 2]);
+
+        // temp_val is unique
+        uint64_t table_id = temp_val % (uint64_t)size;
+
+        // cuckoo hashing
+
+        int old_idx = atomicExch(&idx[table_id], id);
+        // uint64_t old_val = atomicExch(&val[table_id], temp_val);
+        // handle collision
+        while(old_idx > -1){
+            table_id = (table_id + 97) % size;
+            old_idx = atomicExch(&idx[table_id], old_idx);
+            // old_val = atomicExch(&val[table_id], old_val);
+        }  
     }
-    while(coord[start * 3 + ao] == value && start >= start_temp){
-        start = start - 1;
+}
+
+__global__ void insertVal(const int nnz, const int size, const int *__restrict__ coord, const int *idx, uint64_t *val){
+    
+    int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id < size){
+        
+        int input_id = idx[id];
+        if (input_id < nnz && input_id > -1){
+            val[id] = coord_hash(coord[3 *input_id], coord[3 * input_id + 1], coord[3 * input_id + 2]);
+        }
     }
-    start = start + 1;
-    range[0] = start;
-    range[1] = end;
-    return 1;
+}
+
+
+__global__ void queryHash(const int nnz, const int size, const int *__restrict__ coord,
+                    const int ks, const int kx, const int ky, const int kz, 
+                    const uint64_t *val, const int *idx, int *map)
+{
+    int id = blockIdx.x * blockDim.x + threadIdx.x;  // a thread for a coord
+    // exclude illegal id number
+    if (id < nnz)
+    {
+        int colli_num = 0; 
+
+        int Ix = coord[id * 3] + kx;
+        int Iy = coord[id * 3 + 1] + ky;
+        int Iz = coord[id * 3 + 2] + kz;
+        
+        uint64_t target_val = coord_hash(Ix, Iy, Iz);
+
+        uint64_t target_id = target_val % (uint64_t)size;
+
+        // find target or empty
+        while (val[target_id] != target_val && idx[target_id] > -1){
+            colli_num += 1;
+            if (colli_num == COLLISION_BOUND){map[id] = -1; return;}
+            target_id = (target_id + 97) % size;
+        }
+        // set map = input id or -1
+        map[id] = idx[target_id];
+    }
 }
 
 
@@ -84,96 +115,6 @@ __global__ void center_map(const int nnz, int *map)
         id += blockDim.x * gridDim.x;
     }
 
-}
-
-
-__global__ void search(const int nnz, const int *__restrict__ coord, 
-                    const int ks, const int kx, const int ky, const int kz, int *map)
-{   
-    int id = blockIdx.x * blockDim.x + threadIdx.x;  // a thread for a coord
-    
-    while(id < nnz)
-    {
-        int Ix = coord[id * 3] + kx;
-        int Iy = coord[id * 3 + 1] + ky;
-        int Iz = coord[id * 3 + 2] + kz;
-
-        /*if (kz > - ks / 2 && map[id] > -1){
-            // use the existing mapping
-            map[id] = coord[3 * (map[id] + 1) + 2] == Iz ? map[id] + 1 : -1;
-            id += blockDim.x * gridDim.x;
-            continue;
-        }*/
-
-        // initialize the mapping ...
-        map[id] = -1;
-        
-        __syncthreads();
-
-        if (Ix >= 0 && Iy >= 0 && Iz >= 0){
-        // printf("Searching for coord (%d,%d,%d)\n", Ix, Iy, Iz);
-        // search the corresponding input coord
-        int range[2];
-        range[0] = 0;
-        range[1] = nnz - 1;
-
-        while(range[0] < range[1]){
-            // search for x
-            if (search_axis(coord, range, Ix, XOFFSET) == 0){
-                break;
-            }
-        
-            // search for y
-            if (search_axis(coord, range, Iy, YOFFSET) == 0){
-                break;
-            }
-        
-            // search for z
-            if (search_axis(coord, range, Iz, ZOFFSET) == 1){
-                if (range[0] == range[1]){
-                    // printf("Input Z[%d] found. Final Found.\n", range[0]);
-                    map[id] = range[0];
-                    break;
-                }
-                else{
-                    // TODO: Methods dealing with coord repetition
-                    map[id] = range[0];
-                    // printf("Same coord appears twice, only one is used.\n");
-                    break;
-                }
-            }
-            else {
-                break;
-            }
-        }
-        //printf("Map[%d] derived.\n", id);
-        }
-        id += blockDim.x * gridDim.x;
-    }
-}
-
-
-__global__ void query(const int nnz, int *map){
-
-    int id = blockIdx.x * blockDim.x + threadIdx.x;
-    while(id < nnz)
-    {
-        int count = 0;
-        int temp_map = map[2 * id];
-
-        for(int i = 0; i < id; i++){
-            if(map[2 * i] > -1){count += 1;}
-        }
-
-        __syncthreads();
-
-        if (map[2 * id] > -1){
-
-            map[2 * count + 1] = id;
-            map[2 * count] = temp_map;
-        }
-        id += blockDim.x * gridDim.x;
-    }
 }
 
 
@@ -192,6 +133,8 @@ __global__ void gemm(const int nnz, const int kernel_nnz, const int c_in, const 
   // Coordinate. x is for rows, y is for columns.
   const int x = BLOCK_SIZE * bx + tx;
   const int y = BLOCK_SIZE * by + ty;
+  // const int y = BLOCK_SIZE * bx + tx;
+  // const int x = BLOCK_SIZE * by + ty;
 
   // The thread deals with the x-th channel of the y-th output
   const int out_row = y < kernel_nnz ? nnz_idx[y] : -1;
@@ -262,11 +205,33 @@ void ConvolutionForward(at::Tensor in_coords, at::Tensor in_feats,
 
     size_t const blocknum = (nnz + BLOCK_SIZE  - 1) / BLOCK_SIZE;
 
+    int table_size = 2 * pow(2, ceil(log2((double)nnz)));
+
+    at::Tensor index = - torch::ones({table_size}, at::device(in_coords.device()).dtype(at::ScalarType::Int));
+    at::Tensor value = torch::zeros({table_size}, at::device(in_coords.device()).dtype(at::ScalarType::Long));
+
     float *in_feats_ptr = in_feats.data_ptr<float>();
     float *weight_ptr = kernel.data_ptr<float>();
     float *out_feats_ptr = out_feats.data_ptr<float>();
     int *in_coords_ptr = in_coords.data_ptr<int>();
     int *in_map_ptr = in_map.data_ptr<int>();
+    int *index_ptr = index.data_ptr<int>();
+    uint64_t *value_ptr = (uint64_t *)(value.data_ptr<int64_t>());
+
+    insertHash<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
+        nnz, 
+        table_size, 
+        in_coords_ptr, 
+        index_ptr
+        );
+    
+    insertVal<<<dim3((table_size + BLOCK_SIZE  - 1) / BLOCK_SIZE, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
+        nnz, 
+        table_size, 
+        in_coords_ptr, 
+        index_ptr, 
+        value_ptr
+        );
 
     // Suppose an odd kernel size
     for (int i = 0; i < k_vol; i++){
@@ -283,21 +248,34 @@ void ConvolutionForward(at::Tensor in_coords, at::Tensor in_feats,
             center_map<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(nnz, in_map_ptr);
         }
         else{
-            search<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
+            /*search<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
                 nnz, 
                 in_coords_ptr, 
                 k_size, 
                 k_offset_x, k_offset_y, k_offset_z, 
-                in_map_ptr);
+                in_map_ptr);*/
             
-        // query<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(nnz, in_map_ptr);
+            queryHash<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
+                nnz, 
+                table_size, 
+                in_coords_ptr,
+                k_size, 
+                k_offset_x, 
+                k_offset_y, 
+                k_offset_z, 
+                value_ptr, 
+                index_ptr, 
+                in_map_ptr
+                );
         }
         
-        auto nnz_idx = torch::nonzero(in_map + torch::ones_like(in_map));  // torch::nonzero returns long tensor
+        at::Tensor nnz_idx = torch::nonzero(in_map + torch::ones_like(in_map));  // torch::nonzero returns long tensor
         int kernel_nnz = nnz_idx.size(0);
 
         if (kernel_nnz == 0){continue;}
 
+        // size_t const gridnum_x = (out_channel + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        // size_t const gridnum_y = (kernel_nnz + BLOCK_SIZE - 1) / BLOCK_SIZE;
         size_t const gridnum_x = (out_channel + BLOCK_SIZE - 1) / BLOCK_SIZE;
         size_t const gridnum_y = (kernel_nnz + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
