@@ -76,18 +76,26 @@ __global__ void insertVal(const int nnz, const int size, const int *__restrict__
 
 
 __global__ void queryHash(const int nnz, const int size, const int *__restrict__ coord,
-                    const int ks, const int kx, const int ky, const int kz, 
-                    const uint64_t *val, const int *idx, int *map)
+                    const int ks, const int kv, const uint64_t *val, const int *idx, int *map)
 {
     int id = blockIdx.x * blockDim.x + threadIdx.x;  // a thread for a coord
+
+    int offset_id = id / nnz;
+
+    int nnz_id = id % nnz;
+
     // exclude illegal id number
-    if (id < nnz)
+    if (offset_id < kv)
     {
+        int kx = offset_id / (ks * ks) - (ks - 1) / 2;
+        int ky = (offset_id / ks) % ks - (ks - 1) / 2;
+        int kz = offset_id % ks - (ks - 1) / 2;
+
         int colli_num = 0; 
 
-        int Ix = coord[id * 3] + kx;
-        int Iy = coord[id * 3 + 1] + ky;
-        int Iz = coord[id * 3 + 2] + kz;
+        int Ix = coord[nnz_id * 3] + kx;
+        int Iy = coord[nnz_id * 3 + 1] + ky;
+        int Iz = coord[nnz_id * 3 + 2] + kz;
         
         uint64_t target_val = coord_hash(Ix, Iy, Iz);
 
@@ -190,7 +198,8 @@ __global__ void gemm(const int nnz, const int kernel_nnz, const int c_in, const 
 
 void ConvolutionForward(at::Tensor in_coords, at::Tensor in_feats, 
                             at::Tensor kernel, const int k_size, 
-                            at::Tensor in_map, at::Tensor out_feats
+                            at::Tensor in_map, at::Tensor out_feats,
+                            const bool remap
                             ){
     
     // printf("[SubmanifoldSparseConv] - Starts.\n");
@@ -203,41 +212,54 @@ void ConvolutionForward(at::Tensor in_coords, at::Tensor in_feats,
     int out_channel = kernel.size(2);
     int k_vol = k_size * k_size * k_size;
 
-    size_t const blocknum = (nnz + BLOCK_SIZE  - 1) / BLOCK_SIZE;
-
     int table_size = 2 * pow(2, ceil(log2((double)nnz)));
-
-    at::Tensor index = - torch::ones({table_size}, at::device(in_coords.device()).dtype(at::ScalarType::Int));
-    at::Tensor value = torch::zeros({table_size}, at::device(in_coords.device()).dtype(at::ScalarType::Long));
 
     float *in_feats_ptr = in_feats.data_ptr<float>();
     float *weight_ptr = kernel.data_ptr<float>();
     float *out_feats_ptr = out_feats.data_ptr<float>();
     int *in_coords_ptr = in_coords.data_ptr<int>();
     int *in_map_ptr = in_map.data_ptr<int>();
-    int *index_ptr = index.data_ptr<int>();
-    uint64_t *value_ptr = (uint64_t *)(value.data_ptr<int64_t>());
+    
+    if(remap){
 
-    insertHash<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
-        nnz, 
-        table_size, 
-        in_coords_ptr, 
-        index_ptr
+        at::Tensor index = - torch::ones({table_size}, at::device(in_coords.device()).dtype(at::ScalarType::Int));
+        at::Tensor value = torch::zeros({table_size}, at::device(in_coords.device()).dtype(at::ScalarType::Long));
+
+        int *index_ptr = index.data_ptr<int>();
+        uint64_t *value_ptr = (uint64_t *)(value.data_ptr<int64_t>());
+        
+        insertHash<<<dim3((nnz + BLOCK_SIZE  - 1) / BLOCK_SIZE, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
+            nnz, 
+            table_size, 
+            in_coords_ptr, 
+            index_ptr
         );
     
-    insertVal<<<dim3((table_size + BLOCK_SIZE  - 1) / BLOCK_SIZE, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
-        nnz, 
-        table_size, 
-        in_coords_ptr, 
-        index_ptr, 
-        value_ptr
+        insertVal<<<dim3((table_size + BLOCK_SIZE  - 1) / BLOCK_SIZE, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
+            nnz, 
+            table_size, 
+            in_coords_ptr, 
+            index_ptr, 
+            value_ptr
         );
+    
+        queryHash<<<dim3((nnz * k_vol + BLOCK_SIZE  - 1) / BLOCK_SIZE, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
+            nnz, 
+            table_size, 
+            in_coords_ptr,
+            k_size, 
+            k_vol, 
+            value_ptr, 
+            index_ptr, 
+            in_map_ptr
+        );
+    }
 
     // Suppose an odd kernel size
     for (int i = 0; i < k_vol; i++){
 
         // calculate the kernel offset
-        int k_offset_x = i / (k_size * k_size) - (k_size - 1) / 2;
+        /*int k_offset_x = i / (k_size * k_size) - (k_size - 1) / 2;
         int k_offset_y = (i / k_size) % k_size - (k_size - 1) / 2;
         int k_offset_z = i % k_size - (k_size - 1) / 2;
 
@@ -248,12 +270,12 @@ void ConvolutionForward(at::Tensor in_coords, at::Tensor in_feats,
             center_map<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(nnz, in_map_ptr);
         }
         else{
-            /*search<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
+            search<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
                 nnz, 
                 in_coords_ptr, 
                 k_size, 
                 k_offset_x, k_offset_y, k_offset_z, 
-                in_map_ptr);*/
+                in_map_ptr);
             
             queryHash<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
                 nnz, 
@@ -267,9 +289,11 @@ void ConvolutionForward(at::Tensor in_coords, at::Tensor in_feats,
                 index_ptr, 
                 in_map_ptr
                 );
-        }
+        }*/
         
-        at::Tensor nnz_idx = torch::nonzero(in_map + torch::ones_like(in_map));  // torch::nonzero returns long tensor
+        at::Tensor kernel_map;
+        kernel_map = torch::from_blob(&in_map_ptr[i * nnz], {nnz}, at::device(in_map.device()).dtype(at::ScalarType::Int));
+        at::Tensor nnz_idx = torch::nonzero(kernel_map + torch::ones_like(kernel_map));  // torch::nonzero returns long tensor
         int kernel_nnz = nnz_idx.size(0);
 
         if (kernel_nnz == 0){continue;}
@@ -288,7 +312,7 @@ void ConvolutionForward(at::Tensor in_coords, at::Tensor in_feats,
                 &weight_ptr[i * in_channel * out_channel],
                 out_feats_ptr,
                 nnz_idx.data_ptr<long>(), 
-                in_map_ptr);
+                &in_map_ptr[i * nnz]);
     
     }
 

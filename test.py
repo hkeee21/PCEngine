@@ -3,14 +3,15 @@ import torch
 from typing import List, Tuple, Union
 from itertools import repeat
 import time
-from torch.utils.cpp_extension import load
-from torchsparse.utils.quantize import sparse_quantize
 from utils import sparse_quantize, load_file
+# from spconvmod.backend import conv_fwd_cuda
+from spconv import conv3d
 
-backend = load(name="conv_fwd_cuda",
-                   sources=["backend/pybind_cuda.cpp", 
-                   "backend/spconv.cu"],
-                   verbose=True)
+'''
+cuda_module = load(name="tag_profiling",
+                   sources=["/home/hongke21/nfs/code/tag_profiling.cpp", "/home/hongke21/nfs/code/tag_profiling.cu"],
+                   verbose=True)'''
+
 
 if __name__ == '__main__': 
     device = torch.device('cuda')
@@ -21,7 +22,7 @@ if __name__ == '__main__':
     # To generate the inputs (COO + feats)
     # Here input size denotes the number of input nnz. 
     # Currently only odd kernel size is considered
-    input_size, input_channel, kernel_size = 20000, 3, 3
+    input_size, input_channel, kernel_size = 300000, 3, 3
     voxel_size = 0.1
 
     
@@ -47,7 +48,7 @@ if __name__ == '__main__':
     # real data test
     input_channel, kernel_size = 3, 3
 
-    coord, colors, pcd = load_file("data/1.ply")
+    coord, colors, pcd = load_file("/home/hongke21/nfs/MinkowskiEngine/MinkowskiEngine/examples/1.ply")
     coord -= np.min(coord, axis=0, keepdims=True)
     voxel_size = 0.02
     coord, indices = sparse_quantize(coord, voxel_size, return_index=True)
@@ -55,41 +56,36 @@ if __name__ == '__main__':
     coords = torch.tensor(coord, dtype=torch.int).to(device)
     feats = torch.tensor(colors[indices], dtype=torch.float).to(device)
     
-
+    
     # To generate the weights
     output_channel = 64
-    weights = np.random.uniform(0, 1, size=(kernel_size ** 3, input_channel, output_channel))
-    weights = torch.tensor(weights, dtype=torch.float).to(device)
+    # weights = np.random.uniform(0, 1, size=(kernel_size ** 3, input_channel, output_channel))
+    # weights = torch.tensor(weights, dtype=torch.float).to(device)
 
     # map and output, for mem allocation observation
-    output = torch.zeros((input_nnz, output_channel), dtype=torch.float).to(device)
-    map = torch.zeros((input_nnz,), dtype=torch.int).to(device)
+    # output = torch.zeros((input_nnz, output_channel), dtype=torch.float).to(device)
+    maps = torch.zeros((input_nnz * (kernel_size ** 3)), dtype=torch.int).to(device)
+
+    conv = conv3d(in_channels=input_channel,
+                out_channels=output_channel,
+                kernel_size=kernel_size).to(device)
+
+    mappat = list()
 
     for _ in range(3):
         with torch.no_grad(): 
-            backend.conv_fwd_cuda(
-                coords,
-                feats,
-                weights,
-                kernel_size,
-                map,
-                output
-        )
+            _ = conv(coords, feats, maps, mappat)
     
     torch.cuda.synchronize()
     start=time.time()
 
     for _ in range(iter_num):
+        # cuda_module.torch_launch_tag_profiling()
 
         with torch.no_grad(): 
-            backend.conv_fwd_cuda(
-                coords,
-                feats,
-                weights,
-                kernel_size,
-                map,
-                output
-        )
+            output = conv(coords, feats, maps, mappat)
+
+        # cuda_module.torch_launch_tag_profiling()
     
     
     torch.cuda.synchronize()

@@ -9,10 +9,11 @@ void conv_fwd_cuda(at::Tensor in_coords,
                         at::Tensor kernel, 
                         const int k_size,
                         at::Tensor in_map,
-                        at::Tensor out_feats){
+                        at::Tensor out_feats,
+                        const bool remap){
   at::DeviceGuard guard(in_feats.device());
   
-  ConvolutionForward(in_coords, in_feats, kernel, k_size, in_map, out_feats);
+  ConvolutionForward(in_coords, in_feats, kernel, k_size, in_map, out_feats, remap);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

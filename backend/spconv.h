@@ -13,4 +13,6 @@ void ConvolutionForward(at::Tensor in_coords,
                         at::Tensor kernel, 
                         const int k_size,
                         at::Tensor in_map,
-                        at::Tensor out_feats);
+                        at::Tensor out_feats,
+                        const bool remap
+                        );
