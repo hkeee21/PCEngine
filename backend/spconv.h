@@ -8,11 +8,8 @@
 
 extern "C"
 
-void ConvolutionForward(at::Tensor in_coords, 
-                        at::Tensor in_feats, 
-                        at::Tensor kernel, 
-                        const int k_size,
-                        at::Tensor in_map,
-                        at::Tensor out_feats,
-                        const bool remap
+void ConvolutionForward(const at::Tensor in_coords, const at::Tensor in_feats, 
+                        const at::Tensor kernel, const int k_size, 
+                        const at::Tensor in_map, at::Tensor out_feats,
+                        const at::Tensor kernel_nnz, const at::Tensor whole_idx
                         );

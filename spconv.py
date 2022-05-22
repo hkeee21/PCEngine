@@ -2,12 +2,17 @@ import torch.nn as nn
 import torch
 from torch.utils.cpp_extension import load
 import math
+from sptensor import spTensor
 
-backend = load(name="conv_fwd_cuda",
-                   sources=["backend/pybind_cuda.cpp", 
-                   "backend/spconv.cu"],
+hash_module = load(name="mapping_cuda",
+                   sources=["backend/pybind_hash.cpp", 
+                   "backend/hash.cu"],
                    verbose=True)
 
+conv_module = load(name="conv_fwd_cuda",
+                   sources=["backend/pybind_conv.cpp", 
+                   "backend/spconv.cu"],
+                   verbose=True)
 
 class conv3d(nn.Module):
     
@@ -27,13 +32,9 @@ class conv3d(nn.Module):
         self.reset_parameters()
     
 
-    def forward(self, coords: torch.IntTensor, feats: torch.FloatTensor, 
-                maps: torch.IntTensor, mappat: list) -> torch.FloatTensor:
+    def forward(self, input: spTensor) -> torch.FloatTensor:
         
-        return conv_func(coords=coords,
-                        feats=feats,
-                        maps=maps,
-                        mappat=mappat,
+        return conv_func(input=input,
                         out_channel=self.out_channels,
                         kernel=self.kernel,
                         kernel_size=self.kernel_size,
@@ -48,30 +49,40 @@ class conv3d(nn.Module):
     
 
 
-def conv_func(coords, feats, maps, mappat, out_channel, kernel, kernel_size):
+def conv_func(input, out_channel, kernel, kernel_size):
     
-    input_size = coords.size(0)
+    input_size = input.coords.size(0)
 
-    output = torch.zeros((input_size, out_channel), dtype=torch.float, device=feats.device)
+    output_feats = torch.zeros((input_size, out_channel), dtype=torch.float, device=input.coords.device)
 
-    # hashgemm-v2
-    # remap = True
+    if kernel_size not in input.mappat:
+        
+        input.mappat.append(kernel_size)
+        input.maps[kernel_size] = torch.zeros((input_size * (kernel_size ** 3)), dtype=torch.int, device=input.coords.device)
+        input.knnz[kernel_size] = torch.zeros((kernel_size ** 3), dtype=torch.int, device=input.coords.device)
 
-    # hashgemm-v3
-    
-    remap = False
-    if kernel_size not in mappat:
-        remap = True
-        mappat.append(kernel_size)
+        input.kidx[kernel_size] = hash_module.mapping_cuda(
+            input.coords,
+            kernel_size,
+            input.maps[kernel_size],
+            input.knnz[kernel_size]
+        )
 
-    backend.conv_fwd_cuda(
-                coords,
-                feats,
-                kernel,
-                kernel_size,
-                maps,
-                output,
-                remap
-                )
+    conv_module.conv_fwd_cuda(
+        input.coords,
+        input.feats,
+        kernel,
+        kernel_size,
+        input.maps[kernel_size],
+        output_feats,
+        input.knnz[kernel_size],
+        input.kidx[kernel_size]
+    )
+
+    output = spTensor(output_feats, input.coords)
+    output.mappat = input.mappat
+    output.maps[kernel_size] = input.maps[kernel_size]
+    output.knnz[kernel_size] = input.knnz[kernel_size]
+    output.kidx[kernel_size] = input.kidx[kernel_size]
     
     return output
