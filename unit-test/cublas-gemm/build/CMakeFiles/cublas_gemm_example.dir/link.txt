@@ -1,0 +1,1 @@
+/usr/bin/g++  CMakeFiles/cublas_gemm_example.dir/cublas_gemm_example.cu.o -o cublas_gemm_example  -lcublas  -L"/home/eva_share/opt/cuda-11.1/targets/x86_64-linux/lib/stubs" -L"/home/eva_share/opt/cuda-11.1/targets/x86_64-linux/lib" -lcudadevrt -lcudart_static -lrt -lpthread -ldl
