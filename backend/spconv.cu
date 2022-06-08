@@ -1,4 +1,5 @@
 #include "spconv.h"
+#include "gemm.cuh"
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -10,10 +11,18 @@
 #include <stdlib.h>
 #include <torch/extension.h>
 
+#include <cublas_v2.h>
+#include <cuda_runtime.h>
+
+#include "cublas_utils.h"
+
 using namespace std;
 
-#define BLOCK_SIZE 32
-
+#define GEMM_SIZE 16
+#define PAR_THREAD 256
+#define LoopGemm 0
+#define FuseGemm 1
+#define FuseOrch 2
 
 extern "C"
 
@@ -24,89 +33,6 @@ extern "C"
     exit(EXIT_FAILURE); \
     } \
 } while(0)
-
-
-__global__ void center_map(const int nnz, int *map)
-{
-    int id = blockIdx.x * blockDim.x + threadIdx.x;  // a thread for a coord
-    while(id < nnz)
-    {
-        map[id] = id;
-
-        id += blockDim.x * gridDim.x;
-    }
-
-}
-
-
-__global__ void gemm(const int nnz, const int kernel_nnz, const int c_in, const int c_out,
-                const float *__restrict__ in_f, const float *__restrict__ kv, float *out_f,
-                const long *nnz_idx, const int *map) {
-
-  // Block index
-  const int bx = blockIdx.x;
-  const int by = blockIdx.y;
-
-  // Thread index
-  const int tx = threadIdx.x;
-  const int ty = threadIdx.y;
-
-  // Coordinate. x is for rows, y is for columns.
-  const int x = BLOCK_SIZE * bx + tx;
-  const int y = BLOCK_SIZE * by + ty;
-  // const int y = BLOCK_SIZE * bx + tx;
-  // const int x = BLOCK_SIZE * by + ty;
-
-  // The thread deals with the x-th channel of the y-th output
-  const int out_row = y < kernel_nnz ? nnz_idx[y] % nnz : -1;
-  const int in_row = y < kernel_nnz ? map[out_row] : -1;
-
-  if(in_row > -1 && out_row > -1){
-  // Csub is used to store the element of the block sub-matrix
-  // that is computed by the thread
-  float Csub = 0;
-  
-  // Loop over all the sub-matrices of A and B
-  // required to compute the block sub-matrix
-  for (int s = 0; s < c_in; s += BLOCK_SIZE) {
-    // Declaration of the shared memory array As used to
-    // store the sub-matrix of A
-    __shared__ float As[BLOCK_SIZE][BLOCK_SIZE];
-
-    // Declaration of the shared memory array Bs used to
-    // store the sub-matrix of B
-    __shared__ float Bs[BLOCK_SIZE][BLOCK_SIZE];
-
-    // Load the matrices from device memory
-    // to shared memory; each thread loads
-    // one element of each matrix
-    As[ty][tx] = ((s + tx) < c_in && in_row < nnz) ? in_f[c_in * in_row + s + tx] : 0;
-    Bs[ty][tx] = ((s + ty) < c_in && x < c_out) ? kv[c_out * (s + ty) + x] : 0;
-
-    // Synchronize to make sure the matrices are loaded
-    __syncthreads();
-
-    // Multiply the two matrices together;
-    // each thread computes one element
-    // of the block sub-matrix
-#pragma unroll
-    for (int k = 0; k < BLOCK_SIZE; ++k) {
-      Csub += As[ty][k] * Bs[k][tx];
-    }
-
-    // Synchronize to make sure that the preceding
-    // computation is done before loading two new
-    // sub-matrices of A and B in the next iteration
-    __syncthreads();
-  }
-
-  // Write the block sub-matrix to device memory;
-  // each thread writes one element
-  if (out_row < nnz && x < c_out)
-    atomicAdd(&out_f[c_out * out_row + x], Csub);
-  // C[wB * out_row + x] += Csub;
-  }
-}
 
 
 void ConvolutionForward(const at::Tensor in_coords, const at::Tensor in_feats, 
@@ -132,80 +58,199 @@ void ConvolutionForward(const at::Tensor in_coords, const at::Tensor in_feats,
     int *in_map_ptr = in_map.data_ptr<int>();
     long *whole_idx_ptr = whole_idx.data_ptr<long>();
 
+    int total_nnz = kernel_nnz.sum().item<int>();
 
-    // loop over all kernel offsets
-    int cur_idx = 0;
+    unsigned int branch = LoopGemm;
 
-    // Suppose an odd kernel size
-    for (int i = 0; i < k_vol; i++){
-
-        // calculate the kernel offset
-        /*int k_offset_x = i / (k_size * k_size) - (k_size - 1) / 2;
-        int k_offset_y = (i / k_size) % k_size - (k_size - 1) / 2;
-        int k_offset_z = i % k_size - (k_size - 1) / 2;
-
-        // search the nnz involved and record the mapping
-        // kernel offset (0, 0, 0) need no mapping calculation
-
-        if (k_offset_x == 0 && k_offset_y == 0 && k_offset_z == 0){
-            center_map<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(nnz, in_map_ptr);
+    // branch
+    if (total_nnz < 45000){
+        if (in_channel <= 64 && out_channel <= 128){
+            branch = FuseGemm;
         }
-        else{
-            search<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
-                nnz, 
-                in_coords_ptr, 
-                k_size, 
-                k_offset_x, k_offset_y, k_offset_z, 
-                in_map_ptr);
-            
-            queryHash<<<dim3(blocknum, 1, 1), dim3(BLOCK_SIZE, 1, 1)>>>(
-                nnz, 
-                table_size, 
-                in_coords_ptr,
-                k_size, 
-                k_offset_x, 
-                k_offset_y, 
-                k_offset_z, 
-                value_ptr, 
-                index_ptr, 
-                in_map_ptr
-                );
-        }
-        
-        at::Tensor kernel_map;
-        kernel_map = torch::from_blob(&in_map_ptr[i * nnz], {nnz}, at::device(in_map.device()).dtype(at::ScalarType::Int));
-        at::Tensor nnz_idx = torch::nonzero(kernel_map + torch::ones_like(kernel_map));  // torch::nonzero returns long tensor
-        int kernel_nnz = nnz_idx.size(0);*/
-
-        int cur_nnz = kernel_nnz[i].item<int>();
-
-        if (cur_nnz == 0){continue;}
-
-        // size_t const gridnum_x = (out_channel + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        // size_t const gridnum_y = (kernel_nnz + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        size_t const gridnum_x = (out_channel + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        size_t const gridnum_y = (cur_nnz + BLOCK_SIZE - 1) / BLOCK_SIZE;
-
-        // GEMM
-        gemm<<<dim3(gridnum_x, gridnum_y, 1), dim3(BLOCK_SIZE, BLOCK_SIZE, 1)>>>(
-                nnz, 
-                cur_nnz, 
-                in_channel, out_channel,
-                in_feats_ptr,
-                &weight_ptr[i * in_channel * out_channel],
-                out_feats_ptr,
-                &whole_idx_ptr[cur_idx], 
-                &in_map_ptr[i * nnz]);
-        
-        cur_idx += cur_nnz;
-    
+        else{ branch = FuseOrch;}
     }
 
-    // printf("[SubmanifoldSparseConv] - Ends.\n");
+    
+    if (branch == LoopGemm){
+
+        int max_nnz = kernel_nnz.max().item<int>();
+
+        at::Tensor gfeats = torch::zeros({max_nnz * in_channel}, at::device(in_feats.device()).dtype(at::ScalarType::Float));
+        at::Tensor sfeats = torch::zeros({max_nnz * out_channel}, at::device(in_feats.device()).dtype(at::ScalarType::Float));
+
+        float *gfeats_ptr = gfeats.data_ptr<float>();
+        float *sfeats_ptr = sfeats.data_ptr<float>();
+
+        // cublas
+        const float alpha = 1.0;
+        const float beta = 0.0;
+
+        cublasHandle_t cublasH = at::cuda::getCurrentCUDABlasHandle();
+        cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+
+        CUBLAS_CHECK(cublasSetStream(cublasH, stream));
+
+        // loop over all kernel offsets
+        int cur_idx = 0;
+
+        // Suppose an odd kernel size
+        for (int i = 0; i < k_vol; i++){
+
+            int cur_nnz = kernel_nnz[i].item<int>();
+
+            if (cur_nnz == 0){continue;}
+
+            size_t const block_g = in_channel > PAR_THREAD ? in_channel : PAR_THREAD;
+            size_t const grid_g = (cur_nnz * in_channel + block_g - 1) / block_g;
+
+            gather<<<grid_g, block_g, ((block_g + in_channel - 1) / in_channel + 1) * sizeof(int)>>>(
+                nnz,
+                cur_nnz,
+                in_channel,
+                in_feats_ptr,
+                &whole_idx_ptr[cur_idx],
+                &in_map_ptr[i * nnz],
+                gfeats_ptr
+            );
+
+            // cublas Sgemm for matmul
+            CUBLAS_CHECK(cublasSgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
+                out_channel, cur_nnz, in_channel, 
+                &alpha, 
+                &weight_ptr[i * in_channel * out_channel], 
+                out_channel, 
+                gfeats_ptr, 
+                in_channel, 
+                &beta, 
+                sfeats_ptr, 
+                out_channel)
+            );
+
+            size_t const block_s = out_channel > PAR_THREAD ? out_channel : PAR_THREAD;
+            size_t const grid_s = (cur_nnz * out_channel + block_s - 1) / block_s;
+        
+            scatter<<<grid_s, block_s, ((block_s + out_channel - 1) / out_channel + 1) * sizeof(int)>>>(
+                nnz,
+                cur_nnz,
+                out_channel,
+                sfeats_ptr, 
+                &whole_idx_ptr[cur_idx],
+                &in_map_ptr[i * nnz],
+                out_feats_ptr
+            );
+
+            cur_idx += cur_nnz;
+        }
+
+    }
+    else if (branch == FuseOrch){
+
+        at::Tensor gfeats = torch::zeros({total_nnz * in_channel}, at::device(in_feats.device()).dtype(at::ScalarType::Float));
+        at::Tensor sfeats = torch::zeros({total_nnz * out_channel}, at::device(in_feats.device()).dtype(at::ScalarType::Float));
+
+        float *gfeats_ptr = gfeats.data_ptr<float>();
+        float *sfeats_ptr = sfeats.data_ptr<float>();
+
+        // cublas
+        const float alpha = 1.0;
+        const float beta = 0.0;
+
+        cublasHandle_t cublasH = at::cuda::getCurrentCUDABlasHandle();
+        cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+
+        CUBLAS_CHECK(cublasSetStream(cublasH, stream));
+
+        size_t const block_g = in_channel > PAR_THREAD ? in_channel : PAR_THREAD;
+        size_t const grid_g = (total_nnz * in_channel + block_g - 1) / block_g;
+
+        // gather for all kernel offsets
+        gather_all<<<grid_g, block_g, ((block_g + in_channel - 1) / in_channel + 1) * sizeof(int)>>>(
+            nnz,
+            total_nnz,
+            in_channel,
+            in_feats_ptr,
+            whole_idx_ptr,
+            in_map_ptr,
+            gfeats_ptr
+        );
+
+        // loop over all kernel offsets
+        int cur_idx = 0;
+
+        // Suppose an odd kernel size
+        for (int i = 0; i < k_vol; i++){
+
+            int cur_nnz = kernel_nnz[i].item<int>();
+
+            if (cur_nnz == 0){continue;}
+
+            // cublas Sgemm for matmul
+            CUBLAS_CHECK(cublasSgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
+                out_channel, cur_nnz, in_channel, 
+                &alpha, 
+                &weight_ptr[i * in_channel * out_channel], 
+                out_channel, 
+                &gfeats_ptr[cur_idx * in_channel], 
+                in_channel, 
+                &beta, 
+                &sfeats_ptr[cur_idx * out_channel], 
+                out_channel)
+            );
+                
+            cur_idx += cur_nnz;
+        }
+
+        size_t const block_s = out_channel > PAR_THREAD ? out_channel : PAR_THREAD;
+        size_t const grid_s = (total_nnz * out_channel + block_s - 1) / block_s;
+
+        // scatter for all kernel offsets
+        scatter_all<<<grid_s, block_s, ((block_s + out_channel - 1) / out_channel + 1) * sizeof(int)>>>(
+            nnz,
+            total_nnz,
+            out_channel,
+            sfeats_ptr, 
+            whole_idx_ptr,
+            in_map_ptr,
+            out_feats_ptr
+        );
+
+    }
+    else if (branch == FuseGemm){
+
+        // loop over all kernel offsets
+        int cur_idx = 0;
+
+        // Suppose an odd kernel size
+        for (int i = 0; i < k_vol; i++){
+
+            int cur_nnz = kernel_nnz[i].item<int>();
+
+            if (cur_nnz == 0){continue;}
+
+            size_t const gridnum_x = (out_channel + GEMM_SIZE - 1) / GEMM_SIZE;
+            size_t const gridnum_y = (cur_nnz + GEMM_SIZE - 1) / GEMM_SIZE;
+
+            // GEMM
+            gemm<<<dim3(gridnum_x, gridnum_y, 1), dim3(GEMM_SIZE, GEMM_SIZE, 1)>>>(
+                    nnz, 
+                    cur_nnz, 
+                    in_channel, out_channel,
+                    in_feats_ptr,
+                    &weight_ptr[i * in_channel * out_channel],
+                    out_feats_ptr,
+                    &whole_idx_ptr[cur_idx], 
+                    &in_map_ptr[i * nnz]);
+        
+            cur_idx += cur_nnz;
+        }
+
+    }
+    else{ printf("No Mode Matches !");}
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess){
         printf("CUDA Error: %s\n", cudaGetErrorString(err));
     }
 
+    return;
 }
