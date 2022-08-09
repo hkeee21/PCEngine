@@ -4,18 +4,31 @@
 
 #include "spconv.h"
 
-void conv_fwd_cuda(at::Tensor in_coords, 
-                at::Tensor in_feats, 
-                at::Tensor kernel, 
+void conv_fwd_cuda(const at::Tensor in_feats, 
+                const at::Tensor kernel, 
                 const int k_size,
-                at::Tensor in_map, 
                 at::Tensor out_feats,
-                at::Tensor kernel_nnz, 
-                at::Tensor whole_idx
+                const at::Tensor kernel_nnz, 
+                const at::Tensor kernel_pos, 
+                const at::Tensor in_map, 
+                const at::Tensor out_map, 
+                at::Tensor gather_buffer, 
+                at::Tensor scatter_buffer, 
+                const bool TensorCoreMode
                 ){
   at::DeviceGuard guard(in_feats.device());
   
-  ConvolutionForward(in_coords, in_feats, kernel, k_size, in_map, out_feats, kernel_nnz, whole_idx);
+  ConvolutionForward(in_feats, 
+                    kernel, 
+                    k_size, 
+                    out_feats, 
+                    kernel_nnz, 
+                    kernel_pos, 
+                    in_map, 
+                    out_map, 
+                    gather_buffer,
+                    scatter_buffer,
+                    TensorCoreMode);
 }
 
 

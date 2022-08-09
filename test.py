@@ -5,7 +5,6 @@ from itertools import repeat
 import time
 import argparse
 from utils import sparse_quantize, load_file
-# from spconvmod.backend import conv_fwd_cuda
 from spconv import conv3d
 from sptensor import spTensor
 
@@ -23,7 +22,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--input-size', type=int, default=100000)
     parser.add_argument('--conv-layers', type=int, default=100)
-    parser.add_argument('--in-channels', type=int, default=3)
+    parser.add_argument('--in-channels', type=int, default=16)
     parser.add_argument('--out-channels', type=int, default=32)
     parser.add_argument('--kernel-size', type=int, default=3)
     parser.add_argument('--real-data', type=bool, default=False)
@@ -56,7 +55,6 @@ if __name__ == '__main__':
 
         coords = torch.tensor(coords, dtype=torch.int)
         feats = torch.tensor(feats, dtype=torch.float)
-        
 
     else:
         # real data test
@@ -71,28 +69,36 @@ if __name__ == '__main__':
         feat = np.random.uniform(0, 1, size=(input_nnz, input_channel)) 
         coords = torch.tensor(coord, dtype=torch.int)
         feats = torch.tensor(feat, dtype=torch.float)
+    
 
+    #conv_warmup = conv3d(in_channels=input_channel,
+    #                    out_channels=output_channel,
+    #                    kernel_size=5
+    #).to(device)
     input = spTensor(feats, coords).to(device)
 
     conv = conv3d(in_channels=input_channel,
                 out_channels=output_channel,
-                kernel_size=kernel_size).to(device)
+                kernel_size=kernel_size, 
+                tc_mode_16f=1).to(device)
 
-    for _ in range(3):
+    for _ in range(0):
         with torch.no_grad():
-     
+
             _ = conv(input)
     
 
     torch.cuda.synchronize()
     start=time.time()
 
+    torch.cuda.cudart().cudaProfilerStart()
     for _ in range(iter_num):
         # cuda_module.torch_launch_tag_profiling()
 
         with torch.no_grad():
 
             output = conv(input)
+    torch.cuda.cudart().cudaProfilerStop()
 
         # cuda_module.torch_launch_tag_profiling()
     
