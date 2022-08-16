@@ -15,18 +15,6 @@ inline __device__ int kernel_map_decoder(int code){
     return (code % 1186111);
 }
 
-__global__ void center_map(const int nnz, int *map)
-{
-    int id = blockIdx.x * blockDim.x + threadIdx.x;  // a thread for a coord
-    while(id < nnz)
-    {
-        map[id] = id;
-
-        id += blockDim.x * gridDim.x;
-    }
-
-}
-
 
 __global__ void gather(const int nnz, const int kernel_nnz, const int c_in, 
                     const float *__restrict__ in_f, const int *imap, float *g_f){
