@@ -15,18 +15,6 @@ inline __device__ int kernel_map_decoder(int code){
     return (code % 1186111);
 }
 
-__global__ void center_map(const int nnz, int *map)
-{
-    int id = blockIdx.x * blockDim.x + threadIdx.x;  // a thread for a coord
-    while(id < nnz)
-    {
-        map[id] = id;
-
-        id += blockDim.x * gridDim.x;
-    }
-
-}
-
 
 __global__ void gather(const int nnz, const int kernel_nnz, const int c_in, 
                     const float *__restrict__ in_f, const int *imap, float *g_f){
@@ -49,39 +37,6 @@ __global__ void gather(const int nnz, const int kernel_nnz, const int c_in,
         if (in_row[bnid] > -1 && in_row[bnid] < nnz){
             g_f[nid * c_in + cid] = in_f[in_row[bnid] * c_in + cid];
         } 
-    }
-}
-
-
-__global__ void gather_channel_coalesced(
-                    const int nnz, 
-                    const int knnz,
-                    const int c_in,
-                    const float *__restrict__ in_f, 
-                    const int *imap, 
-                    float *g_f){
-
-    const int c_in_unit = c_in >> 2;
-
-    const int id = blockIdx.x * blockDim.x + threadIdx.x;
-    const int nid = id / c_in_unit;
-    const int cid = (id % c_in_unit) << 2;
-    const int bnid = (blockIdx.x * blockDim.x % c_in_unit + threadIdx.x) / c_in_unit;
-
-    if (nid < knnz){
-
-        extern __shared__ int in_row[];
-
-        if (cid == 0 || threadIdx.x == 0){
-            in_row[bnid] = imap[nid];   // in_row 
-        }
-
-        __syncthreads();
-        
-        #pragma unroll
-        for (int c = 0; c < 4; c++){
-            g_f[nid * c_in + cid + c] = in_f[in_row[bnid] * c_in + cid + c];
-        }
     }
 }
 
