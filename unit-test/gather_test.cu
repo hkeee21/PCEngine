@@ -14,7 +14,7 @@ using namespace std;
 #define DIV_UP(x, y) (x + y - 1) / y
 #define NNZS_PER_BLOCK 4
 #define KOFS_THREADS 2
-#define CHNS_THREADS 32
+#define CHNS_THREADS 64
 
 extern "C"
 
