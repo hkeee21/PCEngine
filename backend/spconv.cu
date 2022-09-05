@@ -1,5 +1,5 @@
 #include "spconv.h"
-#include "gemm.cuh"
+#include "spconv.cuh"
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -19,37 +19,21 @@
 using namespace std;
 
 #define PAR_THREAD 256
+#define DIV_UP(x, y) (x + y - 1) / y
+#define SHM_CAL(n, k) n * (k - 1) + 1   
 
 
 extern "C"
-
-inline int kernel_weight_index(const int idx){
-    int order[26] = {
-        0,  26, 
-        1,  25, 
-        2,  24,
-        3,  23,
-        4,  22, 
-        5,  21, 
-        6,  20, 
-        7,  19, 
-        8,  18, 
-        9,  17, 
-        10, 16,
-        11, 15,
-        12, 14
-    };
-    return order[idx];
-}
 
 void ConvolutionForward(const at::Tensor in_feats, 
                         const at::Tensor kernel, 
                         const int k_size, 
                         at::Tensor out_feats, 
                         const at::Tensor kernel_nnz, 
-                        const at::Tensor kernel_pos, 
                         const at::Tensor in_map, 
                         const at::Tensor out_map, 
+                        const at::Tensor in_csr, 
+                        const at::Tensor out_csr, 
                         at::Tensor gather_buffer, 
                         at::Tensor scatter_buffer, 
                         const bool TensorCoreMode
@@ -63,22 +47,21 @@ void ConvolutionForward(const at::Tensor in_feats,
         throw std::invalid_argument("Input feature size and kernel size mismatch");
     }
     int out_channel = kernel.size(2);
-    int k_vol = k_size * k_size * k_size;
+    const int k_vol = k_size * k_size * k_size;
 
     float *in_feats_ptr = in_feats.data_ptr<float>();
     float *weight_ptr = kernel.data_ptr<float>();
     float *out_feats_ptr = out_feats.data_ptr<float>();
     int *in_map_ptr = in_map.data_ptr<int>();
     int *out_map_ptr = out_map.data_ptr<int>();
+    int *in_csr_ptr = in_csr.data_ptr<int>();
+    int *out_csr_ptr = out_csr.data_ptr<int>();
 
-    int *kernel_pos_ptr = kernel_pos.data_ptr<int>();
+    // int *kernel_pos_ptr = kernel_pos.data_ptr<int>();
 
     // int max_nnz = kernel_nnz.max().item<int>();
     // int max_nnz_mod = ceil((double)max_nnz / (double)WMMA_SIZE) * WMMA_SIZE;
-    int sum_nnz = kernel_nnz.sum().item<int>();
-
-    // at::Tensor gfeats = torch::zeros({sum_nnz * in_channel}, at::device(in_feats.device()).dtype(at::ScalarType::Float));
-    // at::Tensor sfeats = torch::zeros({sum_nnz * out_channel}, at::device(in_feats.device()).dtype(at::ScalarType::Float));
+    // int sum_nnz = gather_buffer.size(0);
 
     float *gfeats_ptr = gather_buffer.data_ptr<float>();
     float *sfeats_ptr = scatter_buffer.data_ptr<float>();
@@ -124,10 +107,40 @@ void ConvolutionForward(const at::Tensor in_feats,
     }
 
     // gather features
-    size_t const block_g = in_channel > PAR_THREAD ? in_channel : PAR_THREAD;
-    size_t const grid_g = ((nnz) * (in_channel) + block_g - 1) / block_g;
+    // size_t const BLOCK_NUM = DIV_UP(nnz, 4);
 
-    gather_all_input_major<<<grid_g, block_g>>>(
+    /*gather_all_input_major_template2<4, 2, 32>
+                <<<BLOCK_NUM, dim3(32, 2, 4), 
+                (4 * (k_vol - 1) + 1) * sizeof(int)>>>(
+                nnz, k_vol, sum_nnz, kernel_pos_ptr, in_channel,
+                in_feats_ptr, in_map_ptr, gfeats_ptr);*/
+
+    /*switch(k_size){
+        case 5:
+            gather_all_input_major_template2<4, 2, 32, 4 * 124 + 1>
+                <<<BLOCK_NUM, dim3(32, 2, 4)>>>(
+                nnz, k_vol, sum_nnz, kernel_pos_ptr, in_channel,
+                in_feats_ptr, in_map_ptr, gfeats_ptr);
+            break;
+        case 3:
+            gather_all_input_major_template2<4, 2, 32, 4 * 26 + 1>
+                <<<BLOCK_NUM, dim3(32, 2, 4)>>>(
+                nnz, k_vol, sum_nnz, kernel_pos_ptr, in_channel,
+                in_feats_ptr, in_map_ptr, gfeats_ptr);
+            break;
+        case 2:
+            gather_all_input_major_template2<4, 2, 32, 4 * 7 + 1>
+                <<<BLOCK_NUM, dim3(32, 2, 4)>>>(
+                nnz, k_vol, sum_nnz, kernel_pos_ptr, in_channel,
+                in_feats_ptr, in_map_ptr, gfeats_ptr);
+            break;
+    }*/
+
+    // size_t const block_g = in_channel > PAR_THREAD ? in_channel : PAR_THREAD;
+    // size_t const grid_g = ((nnz) * (in_channel) + block_g - 1) / block_g;
+
+    /*gather_all_input_major_template<4, 2, 32>
+        <<<DIV_UP(nnz, 4), dim3(32, 2, 4)>>>(
             nnz,
             k_vol, 
             sum_nnz,
@@ -136,9 +149,30 @@ void ConvolutionForward(const at::Tensor in_feats,
             in_feats_ptr,
             in_map_ptr,
             gfeats_ptr
+    );*/
+
+    gather_all_input_major_csr_template<2, 2, 16>
+        <<<DIV_UP(nnz, 2), dim3(2, 16, 2)>>>(
+            nnz,
+            k_vol, 
+            in_channel,
+            in_feats_ptr,
+            in_csr_ptr, 
+            in_map_ptr,
+            gfeats_ptr
     );
 
-    // at::Tensor batched_inf, batched_outf, batched_weight;
+    /*gather_all_input_major_csr_balance<64, 8, 16>
+        <<<DIV_UP(sum_nnz, 64), dim3(8, 16)>>>(
+            nnz,
+            k_vol, 
+            sum_nnz,
+            in_channel,
+            in_feats_ptr,
+            in_csr_ptr,  
+            in_map_ptr,
+            gfeats_ptr
+    );*/
 
     // loop over all kernel offsets
     int cur_idx = 0;
@@ -147,8 +181,8 @@ void ConvolutionForward(const at::Tensor in_feats,
     // Suppose an odd kernel size
     for (int i = 0; i < k_vol - 1; i++){
 
-        int cur_nnz = kernel_nnz[i].item<int>();
-
+        int cur_nnz = kernel_nnz.data_ptr<int>()[i];
+        
         // TODO: put the zero check into the scheduler
         if (cur_nnz == 0){continue;}
 
@@ -177,13 +211,12 @@ void ConvolutionForward(const at::Tensor in_feats,
         }
 
         cur_idx += cur_nnz;
-
     }
 
-    size_t const block_s = out_channel > PAR_THREAD ? out_channel : PAR_THREAD;
-    size_t const grid_s = (nnz * (out_channel) + block_s - 1) / block_s;
+    // size_t const block_s = out_channel > PAR_THREAD ? out_channel : PAR_THREAD;
+    // size_t const grid_s = (nnz * (out_channel) + block_s - 1) / block_s;
         
-    scatter_all_output_major<<<grid_s, block_s>>>(
+    /*scatter_all_output_major<<<grid_s, block_s>>>(
             nnz,
             k_vol, 
             sum_nnz,
@@ -192,9 +225,22 @@ void ConvolutionForward(const at::Tensor in_feats,
             sfeats_ptr, 
             out_map_ptr,
             out_feats_ptr
-    );
+    );*/
 
-    return;
+    scatter_all_output_major_csr_template2<4, 2, 64>
+        <<<DIV_UP(nnz, 4), dim3(64, 2, 4)>>>(
+            nnz, k_vol, out_channel, sfeats_ptr, 
+            out_csr_ptr, out_map_ptr, out_feats_ptr);
+
+    /*scatter_all_output_major_csr_predecoding<4, 2, 32>
+        <<<DIV_UP(nnz, 4), dim3(32, 2, 4)>>>(
+            nnz, k_vol, sum_nnz, out_channel, sfeats_ptr, 
+            out_csr_ptr, out_map_ptr, out_feats_ptr);*/
+    
+    /*scatter_all_output_major_csr_balance<128, 4, 16>
+        <<<DIV_UP(sum_nnz, 128), dim3(16, 4)>>>(
+            nnz, k_vol, sum_nnz, out_channel, sfeats_ptr, 
+            out_csr_ptr, out_map_ptr, out_feats_ptr);*/
 }
 
 

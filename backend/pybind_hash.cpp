@@ -4,15 +4,18 @@
 
 #include "hash.h"
 
-void mapping_cuda(at::Tensor in_coords, 
+int mapping_cuda(at::Tensor in_coords, 
             const int k_size,
             at::Tensor imap,
             at::Tensor omap, 
-            at::Tensor kernel_nnz
+            at::Tensor icsr,
+            at::Tensor ocsr, 
+            at::Tensor kernel_nnz,
+            at::Tensor kernel_pos
             ){
   at::DeviceGuard guard(in_coords.device());
 
-  HashMap(in_coords, k_size, imap, omap, kernel_nnz);
+  return HashMap(in_coords, k_size, imap, omap, icsr, ocsr, kernel_nnz, kernel_pos);
 }
 
 

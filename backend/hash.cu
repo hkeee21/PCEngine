@@ -2,6 +2,8 @@
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <thrust/scan.h>
+#include <thrust/remove.h>
 
 #include <math.h>
 #include <stdio.h>
@@ -59,6 +61,15 @@ inline __device__ uint64_t coord_hash(const int ix, const int iy, const int iz){
 
 inline __device__ uint64_t shift_hash(const int size, const uint64_t value){
     return ((value + 1) % ((uint64_t)size - 2));
+}
+
+inline __device__ int kernel_decoder(int code){
+    return (code / 1186111);
+}
+
+
+inline __device__ int kernel_map_decoder(int code){
+    return (code % 1186111);
 }
 
 
@@ -184,7 +195,7 @@ __global__ void queryHash_wholemap(
         int Oy = coord[output_id * 3 + 1];
         int Oz = coord[output_id * 3 + 2];
 
-        int Ocounter = 0;
+        // int Ocounter = 0;
 
         for (int k = 0; k < kv - 1; k++){
             
@@ -224,9 +235,8 @@ __global__ void queryHash_wholemap(
 
             imap[input_id * (kv - 1) + k] = buffer_code;
 
-            omap[output_id * (kv - 1) + Ocounter] = buffer_code; 
-
-            Ocounter++;  
+            omap[output_id * (kv - 1) + k] = buffer_code; 
+            // Ocounter++;  
         }
     }
 }
@@ -314,7 +324,8 @@ __global__ void queryHash_wholemap_stride1(
 __global__ void mapping_subtraction(
                 const int nnz, 
                 const int kv,
-                int *map
+                int *map,
+                int *nnz_neighbor
 ){
     int nid = blockIdx.x * blockDim.x + threadIdx.x;  // a thread for a nnz
 
@@ -336,15 +347,60 @@ __global__ void mapping_subtraction(
 
             counter++;
         }
+
+        nnz_neighbor[nid] = counter;
+
     }
 }
 
 
-void HashMap(const at::Tensor in_coords, 
+__global__ void mapping_counter(
+                const int nnz, 
+                const int kv,
+                const int *map,
+                int *nnz_neighbor
+){
+    int nid = blockIdx.x * blockDim.x + threadIdx.x;  // a thread for a nnz
+
+    if(nid < nnz){
+
+        int counter = 0;
+
+        for (int k = 0; k < kv - 1; k++){
+            
+            bool effective = map[nid * (kv - 1) + k] >= 0;
+
+            counter += effective ? 1 : 0;
+        }
+
+        nnz_neighbor[nid] = counter;
+    }
+}
+
+
+__global__ void mapping_decoder(
+                const int sum_nnz, 
+                const int *__restrict__ kernel_pos,  
+                int *map){
+    // a thread for a mapping
+    int mid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mid >= sum_nnz){return;}
+    int kinf = map[mid];
+    int kofs = kernel_decoder(kinf);
+    int buf_ofs = kernel_map_decoder(kinf);
+    int buf_start = __ldg(&kernel_pos[kofs]);
+    map[mid] = buf_start + buf_ofs;
+}
+
+
+int HashMap(const at::Tensor in_coords, 
                 const int k_size, 
                 at::Tensor imap,
                 at::Tensor omap,  
-                at::Tensor kernel_nnz){
+                at::Tensor icsr,
+                at::Tensor ocsr,
+                at::Tensor kernel_nnz, 
+                at::Tensor kernel_pos){
 
     int nnz = in_coords.size(0);
     int table_size = 2 * pow(2, ceil(log2((double)nnz)));
@@ -354,9 +410,14 @@ void HashMap(const at::Tensor in_coords,
     int *imap_ptr = imap.data_ptr<int>();
     int *omap_ptr = omap.data_ptr<int>();
     int *kernel_nnz_ptr = kernel_nnz.data_ptr<int>();
+    int *kernel_pos_ptr = kernel_pos.data_ptr<int>();
+    int *icsr_ptr = icsr.data_ptr<int>();
+    int *ocsr_ptr = ocsr.data_ptr<int>();
 
-    at::Tensor index = - torch::ones({table_size}, at::device(in_coords.device()).dtype(at::ScalarType::Int));
-    at::Tensor value = torch::zeros({table_size}, at::device(in_coords.device()).dtype(at::ScalarType::Long));
+    at::Tensor index = - torch::ones({table_size}, 
+        at::device(in_coords.device()).dtype(at::ScalarType::Int));
+    at::Tensor value = torch::zeros({table_size}, 
+        at::device(in_coords.device()).dtype(at::ScalarType::Long));
 
     int *index_ptr = index.data_ptr<int>();
     uint64_t *value_ptr = (uint64_t *)(value.data_ptr<int64_t>());
@@ -389,23 +450,41 @@ void HashMap(const at::Tensor in_coords,
         kernel_nnz_ptr
     );
 
-    mapping_subtraction<<<dim3((nnz + 15) / 16, 1, 1), dim3(16, 1, 1)>>>(
+    mapping_counter<<<dim3((nnz + 15) / 16, 1, 1), dim3(16, 1, 1)>>>(
         nnz,
         k_vol,
+        imap_ptr,
+        icsr_ptr
+    );
+
+    mapping_counter<<<dim3((nnz + 15) / 16, 1, 1), dim3(16, 1, 1)>>>(
+        nnz,
+        k_vol,
+        omap_ptr,
+        ocsr_ptr
+    );
+
+    thrust::exclusive_scan(thrust::device, kernel_nnz_ptr, &kernel_nnz_ptr[k_vol - 1], kernel_pos_ptr);
+
+    thrust::exclusive_scan(thrust::device, icsr_ptr, &icsr_ptr[nnz + 1], icsr_ptr);
+    thrust::exclusive_scan(thrust::device, ocsr_ptr, &ocsr_ptr[nnz + 1], ocsr_ptr);
+
+    thrust::remove(thrust::device, imap_ptr, imap_ptr + nnz * (k_vol - 1), -1);
+    thrust::remove(thrust::device, omap_ptr, omap_ptr + nnz * (k_vol - 1), -1);
+
+    int sum_nnz = icsr[nnz].item<int>();
+
+    mapping_decoder<<<dim3((sum_nnz + 15) / 16, 1, 1), dim3(16, 1, 1)>>>(
+        sum_nnz, 
+        kernel_pos_ptr, 
         imap_ptr
     );
-    /*
-    for (int k = 0; k < k_vol; ++k){
 
-        at::Tensor kernel_map;
-        kernel_map = torch::from_blob(&in_map_ptr[k * nnz], {nnz}, at::device(in_map.device()).dtype(at::ScalarType::Int));
-        kernel_nnz[k] = torch::count_nonzero(kernel_map + torch::ones_like(kernel_map));
-        // at::Tensor nnz_idx = torch::nonzero(kernel_map + torch::ones_like(kernel_map));
-        // kernel_nnz[k] = nnz_idx.size(0);
-    
-    }*/
+    mapping_decoder<<<dim3((sum_nnz + 15) / 16, 1, 1), dim3(16, 1, 1)>>>(
+        sum_nnz,
+        kernel_pos_ptr,
+        omap_ptr
+    );
 
-    // at::Tensor whole_idx = torch::nonzero(in_map + torch::ones_like(in_map));   // torch::nonzero returns long tensor
-
-    // return whole_idx;
-}  
+    return sum_nnz;
+}

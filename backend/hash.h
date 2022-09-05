@@ -8,9 +8,12 @@
 
 extern "C"
 
-void HashMap(at::Tensor in_coords, 
+int HashMap(at::Tensor in_coords, 
                 const int k_size,
                 at::Tensor imap,
                 at::Tensor omap, 
-                at::Tensor kernel_nnz
+                at::Tensor icsr,
+                at::Tensor ocsr,
+                at::Tensor kernel_nnz,
+                at::Tensor kernel_pos
                 );

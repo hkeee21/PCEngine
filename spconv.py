@@ -54,9 +54,10 @@ class convF(Function):
     def forward(ctx,
                 in_feats: torch.Tensor,
                 knnz: torch.Tensor, 
-                kpos: torch.Tensor, 
                 imap: torch.Tensor, 
                 omap: torch.Tensor,
+                icsr: torch.Tensor,
+                ocsr: torch.Tensor, 
                 in_channel: int,
                 out_channel: int, 
                 kernel: torch.Tensor, 
@@ -65,10 +66,12 @@ class convF(Function):
                 out_buffer: torch.Tensor, 
                 tensorcore16F: bool) -> torch.Tensor:
         
-        input = input.contiguous()
+        in_feats = in_feats.contiguous()
         kernel = kernel.contiguous()
         imap = imap.contiguous()
         omap = omap.contiguous()
+        icsr = icsr.contiguous()
+        ocsr = ocsr.contiguous()
         in_buffer = in_buffer.contiguous()
         out_buffer = out_buffer.contiguous()
 
@@ -76,22 +79,25 @@ class convF(Function):
             dtype=torch.float, device=in_feats.device)
 
         conv_fwd_cuda(
-        in_feats,
-        kernel,
-        kernel_size,
-        output_feats,
-        knnz,
-        kpos, 
-        imap,
-        omap,
-        in_buffer, 
-        out_buffer, 
-        tensorcore16F
+            in_feats,
+            kernel,
+            kernel_size,
+            output_feats,
+            knnz,
+            imap,
+            omap,
+            icsr,
+            ocsr, 
+            in_buffer, 
+            out_buffer, 
+            tensorcore16F
         )
     
         # TODO: replace in_feats with gathered features in in_buffer
-        ctx.for_backwards = (in_feats, kernel, kernel_size, knnz, kpos, imap, omap, \
+        ctx.for_backwards = (in_feats, kernel, kernel_size, knnz, imap, omap, \
             in_buffer, out_buffer, tensorcore16F)
+        
+        return output_feats
 
     
     @staticmethod
@@ -127,7 +133,7 @@ class convF(Function):
             tensorcore16F
         )
 
-        return in_feats_grad, None, None, None, None, None, None, \
+        return in_feats_grad, None, None, None, None, None, \
             weight_grad, None, None, None, None
 
 
@@ -136,34 +142,56 @@ def conv_func(input, in_channel, out_channel, kernel, kernel_size, tensorcore16F
     input_size = input.coords.size(0)
 
     if kernel_size not in input.mappat:
-        
+    
         input.mappat.append(kernel_size)
         
-        input.knnz[kernel_size] = torch.zeros((kernel_size ** 3 - 1), dtype=torch.int, \
+        input.knnz[kernel_size] = torch.zeros((kernel_size ** 3), dtype=torch.int, \
             device=input.coords.device)
         input.imap[kernel_size] = - torch.ones((input_size * (kernel_size ** 3 - 1)), \
             dtype=torch.int, device=input.coords.device)
         input.omap[kernel_size] = - torch.ones((input_size * (kernel_size ** 3 - 1)), \
             dtype=torch.int, device=input.coords.device)
+        input.kpos[kernel_size] = torch.zeros((kernel_size ** 3 - 1), dtype=torch.int, \
+            device=input.coords.device)
+        input.icsr[kernel_size] = torch.zeros((input_size + 2), dtype=torch.int, \
+            device=input.coords.device)
+        input.ocsr[kernel_size] = torch.zeros((input_size + 2), dtype=torch.int, \
+            device=input.coords.device)
         
-        mapping_cuda(
+        sum_nnz = mapping_cuda(
             input.coords,
             kernel_size,
             input.imap[kernel_size],
-            input.omap[kernel_size],  
-            input.knnz[kernel_size]
+            input.omap[kernel_size], 
+            input.icsr[kernel_size], 
+            input.ocsr[kernel_size],  
+            input.knnz[kernel_size],
+            input.kpos[kernel_size]
         )
 
-        input.kpos[kernel_size] = torch.zeros((kernel_size ** 3 - 1), dtype=torch.int, \
-            device=input.coords.device)
-        for k in range(kernel_size ** 3 - 2):
-            input.kpos[kernel_size][k + 1] = input.kpos[kernel_size][k] + input.knnz[kernel_size][k]
+        # the loop is inefficient
+        # input.kpos[kernel_size] = torch.zeros((kernel_size ** 3 - 1), dtype=torch.int, \
+        #     device=input.coords.device)
+        # for k in range(kernel_size ** 3 - 2):
+        #     input.kpos[kernel_size][k + 1] = input.kpos[kernel_size][k] + input.knnz[kernel_size][k]
+        # input.kpos[kernel_size] = torch.matmul(input.knnz[kernel_size].float(), torch.triu(torch.ones(kernel_size ** 3 - 1, \
+        # kernel_size ** 3 - 1).to(input.coords.device), diagonal=1)).int()
         
-        sum_nnz = input.knnz[kernel_size].sum()
+        # inonzero = torch.nonzero(input.imap[kernel_size] != -1)
+        # input.imap[kernel_size] = input.imap[kernel_size][inonzero]
+        # ononzero = torch.nonzero(input.omap[kernel_size] != -1)
+        # input.omap[kernel_size] = input.omap[kernel_size][ononzero]
+
+        # sum_nnz = input.icsr[kernel_size][input_size].cpu()
+
+        print(sum_nnz)
+        
+        # print("sum_nnz: %d" % sum_nnz)
         input.gbuf[kernel_size] = torch.zeros((sum_nnz, in_channel), dtype=torch.float, \
             device=input.feats.device)
         input.sbuf[kernel_size] = torch.zeros((sum_nnz, out_channel), dtype=torch.float, \
             device=input.feats.device)
+        input.knnz[kernel_size] = input.knnz[kernel_size].cpu()
         
         # nonzero_idx = torch.nonzero(map != -1)
         # input.imap[kernel_size] = map[nonzero_idx]
@@ -172,9 +200,10 @@ def conv_func(input, in_channel, out_channel, kernel, kernel_size, tensorcore16F
     output_feats = convF.apply(
         input.feats,
         input.knnz[kernel_size], 
-        input.kpos[kernel_size],
         input.imap[kernel_size],
         input.omap[kernel_size],
+        input.icsr[kernel_size],
+        input.ocsr[kernel_size],
         in_channel, 
         out_channel,
         kernel, 
@@ -188,6 +217,8 @@ def conv_func(input, in_channel, out_channel, kernel, kernel_size, tensorcore16F
     output.mappat = input.mappat
     output.imap[kernel_size] = input.imap[kernel_size]
     output.omap[kernel_size] = input.omap[kernel_size]
+    output.icsr[kernel_size] = input.icsr[kernel_size]
+    output.ocsr[kernel_size] = input.ocsr[kernel_size]
     output.knnz[kernel_size] = input.knnz[kernel_size]
     output.kpos[kernel_size] = input.kpos[kernel_size]
     output.gbuf[kernel_size] = input.gbuf[kernel_size]
