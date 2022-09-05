@@ -14,7 +14,8 @@ using namespace std;
 #define DIV_UP(x, y) (x + y - 1) / y
 #define NNZS_PER_BLOCK 4
 #define KOFS_THREADS 2
-#define CHNS_THREADS 64
+#define CHNS_THREADS 32
+#define MPNS_PER_BLOCK 128
 
 extern "C"
 
@@ -48,8 +49,8 @@ void mapInit(int *map, int *counter, int nnz, int kv, int mps)
             map[i * (kv - 1) + k] = -1;
         }
 
-        upper_bound = min((kv - 1), left - nnz + i + 1);
-        lower_bound = max(0, left - (nnz - i - 1) * (kv - 1));
+        upper_bound = min((kv - 2), left - (nnz - i - 1) * 3);
+        lower_bound = max(3, left - (nnz - i - 1) * (kv - 2));
         if (left == 0){continue;}
         int knnz = rand() % (upper_bound - lower_bound + 1) + lower_bound;
 
@@ -70,6 +71,39 @@ void mapInit(int *map, int *counter, int nnz, int kv, int mps)
 }
 
 
+void csrmapInit(int *map, int *csr, int *counter, int nnz, int kv, int mps)
+{
+    int left = mps;
+    int lower_bound = (kv - 1);
+    int upper_bound = (kv - 1);
+    std::vector<int> to_fill(kv - 1);
+    std::iota (std::begin(to_fill), std::end(to_fill), 0);
+    csr[0] = 0;
+    for (int i = 0; i < nnz; ++i){
+
+        upper_bound = min((kv - 2), left - (nnz - i - 1) * 7);
+        lower_bound = max(1, left - (nnz - i - 1) * (kv - 2));
+        if (left == 0){continue;}
+        int knnz = rand() % (upper_bound - lower_bound + 1) + lower_bound;
+
+        if (i == nnz - 1){
+            knnz = left;
+        }
+
+        std::random_shuffle(to_fill.begin(), to_fill.end());
+        for (int k = 0; k < knnz; ++k){
+            int kofs = to_fill[k];
+            int kpos = counter[kofs];
+            map[csr[i] + k] = kofs * 1186111 + kpos;
+            counter[kofs]++;
+        }
+
+        left -= knnz;
+        csr[i + 1] = csr[i] + knnz;
+    }
+}
+
+
 int main(int argc, char **argv){
 
     // kernel configuration
@@ -84,16 +118,16 @@ int main(int argc, char **argv){
         *p_kofs_threads = atoi(argv[2]);
         *p_chns_threads = atoi(argv[3]);
     }*/
-    printf("NNZS_PER_BLOCK=%d, KOFS_THREADS=%d, CHNS_THREADS=%d\n", 
-        NNZS_PER_BLOCK, KOFS_THREADS, CHNS_THREADS);
+    // printf("NNZS_PER_BLOCK=%d, KOFS_THREADS=%d, CHNS_THREADS=%d\n", 
+    //     NNZS_PER_BLOCK, KOFS_THREADS, CHNS_THREADS);
 
     // input setup
     // nnz : 2000 ~ 200000
     int nnz = 10000;
     // map size : depend on data sparsity
     int mps = 100000;
-    // output channel : 16, 32, 64, 128, 192, 256, 512
-    int chn = 64;
+    // input channel : 16, 32, 64, 128, 192, 256, 512
+    int chn = 128;
     // kernel size : 2, 3, 5
     int ks = 3;
     int kv = ks * ks * ks;
@@ -116,9 +150,10 @@ int main(int argc, char **argv){
     randomInit(sfeats, mps * chn);
 
     // mapping initialization
-    int *omap = (int *)malloc(nnz * (kv - 1) * sizeof(int));
+    int *omap = (int *)malloc(mps * sizeof(int));
+    int *ocsr = (int *)malloc((nnz + 1) * sizeof(int));
     int *knnz = (int *)malloc((kv - 1) * sizeof(int));
-    mapInit(omap, knnz, nnz, kv, mps);
+    csrmapInit(omap, ocsr, knnz, nnz, kv, mps);
 
     int *kpos = (int *)malloc((kv - 1) * sizeof(int));
     for(int k = 0; k < kv - 1; ++k){
@@ -131,40 +166,50 @@ int main(int argc, char **argv){
     }
 
     /*for (int i = 0; i < nnz; i++){
-        for (int k = 0; k < kv - 1; k++){
-            printf("%d-%d ", imap[i * (kv - 1) + k] / 1186111, imap[i * (kv - 1) + k] % 1186111);
+        for (int k = icsr[i]; k < icsr[i + 1]; k++){
+            printf("%d-%d ", imap[k] / 1186111, imap[k] % 1186111);
         }
-        printf("\n");
+        printf("(%d)\n", icsr[i + 1]);
     }*/
 
     // device memory allocation
     float *dev_feat = nullptr;
     float *dev_sfeat = nullptr;
     int *dev_omap = nullptr;
+    int *dev_ocsr = nullptr;
     int *dev_kpos = nullptr;
 
     checkCudaError(cudaMalloc((void **)&dev_feat, nnz * chn * sizeof(float)));
     checkCudaError(cudaMalloc((void **)&dev_sfeat, mps * chn * sizeof(float)));
-    checkCudaError(cudaMalloc((void **)&dev_omap, nnz * (kv - 1) * sizeof(int)));
+    checkCudaError(cudaMalloc((void **)&dev_omap, mps * sizeof(int)));
+    checkCudaError(cudaMalloc((void **)&dev_ocsr, (nnz + 1) * sizeof(int)));
     checkCudaError(cudaMalloc((void **)&dev_kpos, (kv - 1) * sizeof(int)));
 
     checkCudaError(cudaMemcpy(dev_feat, feature, nnz * chn * sizeof(float), cudaMemcpyHostToDevice));
     checkCudaError(cudaMemcpy(dev_sfeat, sfeats, mps * chn * sizeof(float), cudaMemcpyHostToDevice));
-    checkCudaError(cudaMemcpy(dev_omap, omap, nnz * (kv - 1) * sizeof(int), cudaMemcpyHostToDevice));
+    checkCudaError(cudaMemcpy(dev_omap, omap, mps * sizeof(int), cudaMemcpyHostToDevice));
+    checkCudaError(cudaMemcpy(dev_ocsr, ocsr, (nnz + 1) * sizeof(int), cudaMemcpyHostToDevice));
     checkCudaError(cudaMemcpy(dev_kpos, kpos, (kv - 1) * sizeof(int), cudaMemcpyHostToDevice));
 
     size_t const BLOCK_NUM = DIV_UP(nnz, NNZS_PER_BLOCK);
+    // size_t const BLOCK_NUM = DIV_UP(mps, MPNS_PER_BLOCK);
     // int const NNZS_PER_BLOCK = toConst(nnzs_per_block, 0);
     // int const KOFS_THREADS = toConst(kofs_threads, 0);
     // int const CHNS_THREADS = toConst(chns_threads, 0);
 
     // warmup
     for (int i = 0; i < 20; i++){
-        scatter_all_output_major_template
+        scatter_all_output_major_csr_template3
             <NNZS_PER_BLOCK, KOFS_THREADS, CHNS_THREADS>
-            <<<BLOCK_NUM, dim3(CHNS_THREADS, KOFS_THREADS, NNZS_PER_BLOCK)>>>(
-                nnz, kv, mps, dev_kpos, chn, dev_sfeat, dev_omap, dev_feat
+            <<<BLOCK_NUM, dim3(KOFS_THREADS, CHNS_THREADS, NNZS_PER_BLOCK)>>>(
+            // (NNZS_PER_BLOCK * (kv - 1) + 1) * sizeof(int)>>>(
+                nnz, kv, mps, dev_kpos, chn, dev_sfeat, dev_ocsr, dev_omap, dev_feat
         );
+        /*scatter_all_output_major_csr_balance
+            <MPNS_PER_BLOCK, KOFS_THREADS, CHNS_THREADS>
+            <<<BLOCK_NUM, dim3(CHNS_THREADS, KOFS_THREADS)>>>(
+                nnz, kv, mps, dev_kpos, chn, dev_sfeat, dev_ocsr, dev_omap, dev_feat
+        );*/
     }
 
     // profiling
@@ -178,11 +223,17 @@ int main(int argc, char **argv){
 
     for(int i = 0; i < iter_num; i++)
     {
-        scatter_all_output_major_template
+        scatter_all_output_major_csr_template3
             <NNZS_PER_BLOCK, KOFS_THREADS, CHNS_THREADS>
-            <<<BLOCK_NUM, dim3(CHNS_THREADS, KOFS_THREADS, NNZS_PER_BLOCK)>>>(
-                nnz, kv, mps, dev_kpos, chn, dev_sfeat, dev_omap, dev_feat
+            <<<BLOCK_NUM, dim3(KOFS_THREADS, CHNS_THREADS, NNZS_PER_BLOCK)>>>(
+            // (NNZS_PER_BLOCK * (kv - 1) + 1) * sizeof(int)>>>(
+                nnz, kv, mps, dev_kpos, chn, dev_sfeat, dev_ocsr, dev_omap, dev_feat
         );
+        /*scatter_all_output_major_csr_balance
+            <MPNS_PER_BLOCK, KOFS_THREADS, CHNS_THREADS>
+            <<<BLOCK_NUM, dim3(CHNS_THREADS, KOFS_THREADS)>>>(
+                nnz, kv, mps, dev_kpos, chn, dev_sfeat, dev_ocsr, dev_omap, dev_feat
+        );*/
     }
 
     // Record the stop event
@@ -196,11 +247,18 @@ int main(int argc, char **argv){
 
     printf(
         "Input Info: nnz = %d, channel = %d, map size = %d, kernel size = %d, Time= %.4f msec\n",
-        nnz, chn, mps, ks, msecTotal / 100);
+        nnz, chn, mps, ks, msecTotal / iter_num);
+    
+    /*printf(
+        "%d %d %d %d %.4f\n",
+        nnz, chn, mps, ks, msecTotal / iter_num);*/
+
+    // printf("%.4f\n", msecTotal / iter_num);
 
     checkCudaError(cudaFree(dev_feat));
     checkCudaError(cudaFree(dev_sfeat));
     checkCudaError(cudaFree(dev_omap));
+    checkCudaError(cudaFree(dev_ocsr));
     checkCudaError(cudaFree(dev_kpos));
 
     return 0;
