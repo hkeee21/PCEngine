@@ -10,6 +10,8 @@ extern "C"
 
 int HashMap(at::Tensor in_coords, 
                 const int k_size,
+                const int c_in, 
+                const int c_out, 
                 at::Tensor imap,
                 at::Tensor omap, 
                 at::Tensor icsr,

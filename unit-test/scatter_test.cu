@@ -199,18 +199,23 @@ int main(int argc, char **argv){
 
     // warmup
     for (int i = 0; i < 20; i++){
-        scatter_all_output_major_csr_template3
+        /*scatter_all_output_major_csr_template
             <NNZS_PER_BLOCK, KOFS_THREADS, CHNS_THREADS>
-            <<<BLOCK_NUM, dim3(KOFS_THREADS, CHNS_THREADS, NNZS_PER_BLOCK)>>>(
-            // (NNZS_PER_BLOCK * (kv - 1) + 1) * sizeof(int)>>>(
+            <<<BLOCK_NUM, dim3(CHNS_THREADS, KOFS_THREADS, NNZS_PER_BLOCK)>>>(
                 nnz, kv, mps, dev_kpos, chn, dev_sfeat, dev_ocsr, dev_omap, dev_feat
-        );
+        );*/
         /*scatter_all_output_major_csr_balance
             <MPNS_PER_BLOCK, KOFS_THREADS, CHNS_THREADS>
             <<<BLOCK_NUM, dim3(CHNS_THREADS, KOFS_THREADS)>>>(
                 nnz, kv, mps, dev_kpos, chn, dev_sfeat, dev_ocsr, dev_omap, dev_feat
         );*/
+        scatter_all_output_major_csr_t4k1
+            <NNZS_PER_BLOCK, CHNS_THREADS>
+            <<<BLOCK_NUM, dim3(CHNS_THREADS, NNZS_PER_BLOCK, 1)>>>(
+                nnz, kv, mps, dev_kpos, chn, dev_sfeat, dev_ocsr, dev_omap, dev_feat
+        );
     }
+
 
     // profiling
     cudaEvent_t start, stop;
@@ -223,17 +228,21 @@ int main(int argc, char **argv){
 
     for(int i = 0; i < iter_num; i++)
     {
-        scatter_all_output_major_csr_template3
+        /*scatter_all_output_major_csr_template
             <NNZS_PER_BLOCK, KOFS_THREADS, CHNS_THREADS>
-            <<<BLOCK_NUM, dim3(KOFS_THREADS, CHNS_THREADS, NNZS_PER_BLOCK)>>>(
-            // (NNZS_PER_BLOCK * (kv - 1) + 1) * sizeof(int)>>>(
+            <<<BLOCK_NUM, dim3(CHNS_THREADS, KOFS_THREADS, NNZS_PER_BLOCK)>>>(
                 nnz, kv, mps, dev_kpos, chn, dev_sfeat, dev_ocsr, dev_omap, dev_feat
-        );
+        );*/
         /*scatter_all_output_major_csr_balance
             <MPNS_PER_BLOCK, KOFS_THREADS, CHNS_THREADS>
             <<<BLOCK_NUM, dim3(CHNS_THREADS, KOFS_THREADS)>>>(
                 nnz, kv, mps, dev_kpos, chn, dev_sfeat, dev_ocsr, dev_omap, dev_feat
         );*/
+        scatter_all_output_major_csr_t4k1
+            <NNZS_PER_BLOCK, CHNS_THREADS>
+            <<<BLOCK_NUM, dim3(CHNS_THREADS, NNZS_PER_BLOCK, 1)>>>(
+                nnz, kv, mps, dev_kpos, chn, dev_sfeat, dev_ocsr, dev_omap, dev_feat
+        );
     }
 
     // Record the stop event

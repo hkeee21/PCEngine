@@ -6,23 +6,26 @@ from torch.utils.cpp_extension import load
 import math
 from sptensor import spTensor
 from dgCloud.backend import mapping_cuda, conv_fwd_cuda, conv_bwd_cuda
+import time
 
 
 class conv3d(nn.Module):
     
     def __init__(self,
-                 in_channels: int,
-                 out_channels: int,
+                 in_channels: int = 16,
+                 out_channels: int = 32,
+                 buffer: torch.Tensor = None, 
                  kernel_size: int = 3,
                  tc_mode_16f: bool = 0
                  ) -> None:
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.buffer = buffer
         self.kernel_size = kernel_size
         self.tensorcore16F = tc_mode_16f
         self.kernel_volume = self.kernel_size ** 3
-
+        
         self.kernel = nn.Parameter(
                 torch.rand((self.kernel_volume, in_channels, out_channels), \
                     dtype=torch.float))
@@ -34,6 +37,7 @@ class conv3d(nn.Module):
         return conv_func(input=input,
                         in_channel=self.in_channels, 
                         out_channel=self.out_channels,
+                        buffer=self.buffer, 
                         kernel=self.kernel,
                         kernel_size=self.kernel_size,
                         tensorcore16F = self.tensorcore16F
@@ -54,6 +58,7 @@ class convF(Function):
     def forward(ctx,
                 in_feats: torch.Tensor,
                 knnz: torch.Tensor, 
+                kpos: torch.Tensor, 
                 imap: torch.Tensor, 
                 omap: torch.Tensor,
                 icsr: torch.Tensor,
@@ -62,8 +67,8 @@ class convF(Function):
                 out_channel: int, 
                 kernel: torch.Tensor, 
                 kernel_size: int, 
-                in_buffer: torch.Tensor, 
-                out_buffer: torch.Tensor, 
+                sum_nnz: int, 
+                buffer: torch.Tensor, 
                 tensorcore16F: bool) -> torch.Tensor:
         
         in_feats = in_feats.contiguous()
@@ -72,8 +77,7 @@ class convF(Function):
         omap = omap.contiguous()
         icsr = icsr.contiguous()
         ocsr = ocsr.contiguous()
-        in_buffer = in_buffer.contiguous()
-        out_buffer = out_buffer.contiguous()
+        buffer = buffer.contiguous()
 
         output_feats = torch.zeros((in_feats.size(0), out_channel), \
             dtype=torch.float, device=in_feats.device)
@@ -82,20 +86,21 @@ class convF(Function):
             in_feats,
             kernel,
             kernel_size,
+            sum_nnz, 
             output_feats,
             knnz,
+            kpos, 
             imap,
             omap,
             icsr,
             ocsr, 
-            in_buffer, 
-            out_buffer, 
+            buffer, 
             tensorcore16F
         )
     
         # TODO: replace in_feats with gathered features in in_buffer
         ctx.for_backwards = (in_feats, kernel, kernel_size, knnz, imap, omap, \
-            in_buffer, out_buffer, tensorcore16F)
+            buffer, tensorcore16F)
         
         return output_feats
 
@@ -137,11 +142,13 @@ class convF(Function):
             weight_grad, None, None, None, None
 
 
-def conv_func(input, in_channel, out_channel, kernel, kernel_size, tensorcore16F):
+def conv_func(input, in_channel, out_channel, buffer, 
+    kernel, kernel_size, tensorcore16F):
     
     input_size = input.coords.size(0)
 
     if kernel_size not in input.mappat:
+    # if True:
     
         input.mappat.append(kernel_size)
         
@@ -158,9 +165,14 @@ def conv_func(input, in_channel, out_channel, kernel, kernel_size, tensorcore16F
         input.ocsr[kernel_size] = torch.zeros((input_size + 2), dtype=torch.int, \
             device=input.coords.device)
         
+        # torch.cuda.synchronize()
+        # start=time.time()
+
         sum_nnz = mapping_cuda(
             input.coords,
             kernel_size,
+            in_channel, 
+            out_channel, 
             input.imap[kernel_size],
             input.omap[kernel_size], 
             input.icsr[kernel_size], 
@@ -168,6 +180,13 @@ def conv_func(input, in_channel, out_channel, kernel, kernel_size, tensorcore16F
             input.knnz[kernel_size],
             input.kpos[kernel_size]
         )
+
+        # torch.cuda.synchronize()
+        # end=time.time()
+        # dur=(end-start) * 1000000
+        # print(dur)   # us
+
+        # print(input.buf.shape)
 
         # the loop is inefficient
         # input.kpos[kernel_size] = torch.zeros((kernel_size ** 3 - 1), dtype=torch.int, \
@@ -184,15 +203,15 @@ def conv_func(input, in_channel, out_channel, kernel, kernel_size, tensorcore16F
 
         # sum_nnz = input.icsr[kernel_size][input_size].cpu()
 
-        print(sum_nnz)
-        
-        # print("sum_nnz: %d" % sum_nnz)
-        input.gbuf[kernel_size] = torch.zeros((sum_nnz, in_channel), dtype=torch.float, \
-            device=input.feats.device)
-        input.sbuf[kernel_size] = torch.zeros((sum_nnz, out_channel), dtype=torch.float, \
-            device=input.feats.device)
+        # print(sum_nnz)
         input.knnz[kernel_size] = input.knnz[kernel_size].cpu()
-        
+        input.snnz[kernel_size] = sum_nnz
+
+        # print("sum_nnz: %d" % sum_nnz)
+        if buffer.size(0) < sum_nnz * (in_channel + out_channel):
+            print("Newly allocated buffer.")
+            buffer = torch.zeros((sum_nnz, (in_channel + out_channel)), dtype=torch.float, \
+                device=input.feats.device)
         # nonzero_idx = torch.nonzero(map != -1)
         # input.imap[kernel_size] = map[nonzero_idx]
         # input.omap[kernel_size] = (nonzero_idx % input_size).int()
@@ -200,6 +219,7 @@ def conv_func(input, in_channel, out_channel, kernel, kernel_size, tensorcore16F
     output_feats = convF.apply(
         input.feats,
         input.knnz[kernel_size], 
+        input.kpos[kernel_size], 
         input.imap[kernel_size],
         input.omap[kernel_size],
         input.icsr[kernel_size],
@@ -207,9 +227,9 @@ def conv_func(input, in_channel, out_channel, kernel, kernel_size, tensorcore16F
         in_channel, 
         out_channel,
         kernel, 
-        kernel_size, 
-        input.gbuf[kernel_size], 
-        input.sbuf[kernel_size], 
+        kernel_size,
+        input.snnz[kernel_size],  
+        buffer,
         tensorcore16F
     )
 
@@ -221,7 +241,6 @@ def conv_func(input, in_channel, out_channel, kernel, kernel_size, tensorcore16F
     output.ocsr[kernel_size] = input.ocsr[kernel_size]
     output.knnz[kernel_size] = input.knnz[kernel_size]
     output.kpos[kernel_size] = input.kpos[kernel_size]
-    output.gbuf[kernel_size] = input.gbuf[kernel_size]
-    output.sbuf[kernel_size] = input.sbuf[kernel_size]
+    output.snnz[kernel_size] = input.snnz[kernel_size]
     
     return output

@@ -1,10 +1,10 @@
 import numpy as np
 import torch
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Dict
 from itertools import repeat
 import time
 import argparse
-from utils import sparse_quantize, load_file
+from utils import sparse_quantize, load_file, build_conv_buffer
 from spconv import conv3d
 from sptensor import spTensor
 
@@ -37,13 +37,16 @@ if __name__ == '__main__':
         input_size, input_channel, kernel_size, output_channel = args.input_size, args.in_channels, args.kernel_size, args.out_channels
         voxel_size = 0.1
 
-    
+        voxel_range = 4
+        if input_size > 80000:
+            voxel_range = 10
         # Currently only 3D inputs are considered
-        coords = np.random.uniform(0, 10, size=(input_size, 3))
+        coords = np.random.uniform(0, voxel_range, size=(input_size, 3))
 
         # voxelization
         coords, indices = sparse_quantize(coords, voxel_size, return_index=True)
         input_nnz = coords.shape[0]
+        print("input nnz: %d" % input_nnz)
 
         feats = np.random.uniform(0, 1, size=(input_nnz, input_channel)) 
 
@@ -60,7 +63,7 @@ if __name__ == '__main__':
         # real data test
         input_channel, kernel_size, output_channel = args.in_channels, args.kernel_size, args.out_channels
 
-        coord, _, pcd = load_file("/home/hongke21/nfs/MinkowskiEngine/MinkowskiEngine/examples/1.ply")
+        coord, _, pcd = load_file("data/1.ply")
         coord -= np.min(coord, axis=0, keepdims=True)
         voxel_size = 0.02
         coord, indices = sparse_quantize(coord, voxel_size, return_index=True)
@@ -77,31 +80,44 @@ if __name__ == '__main__':
     #).to(device)
     input = spTensor(feats, coords).to(device)
 
+    cinfo = dict()
+    cinfo["in"] = [input_channel]
+    cinfo["out"] = [output_channel]
+    cinfo["kernel"] = [3, 5] 
+
+    buffer = build_conv_buffer(cinfo, input_nnz, device)
+
+    conv_warmup = conv3d(in_channels=input_channel,
+                    out_channels=output_channel,
+                    buffer=buffer,
+                    kernel_size=5,
+                    tc_mode_16f=1).to(device)
+
     conv = conv3d(in_channels=input_channel,
                 out_channels=output_channel,
+                buffer=buffer,
                 kernel_size=kernel_size, 
                 tc_mode_16f=1).to(device)
 
-    for _ in range(0):
+    for _ in range(10):
         with torch.no_grad():
 
-            _ = conv(input)
+            _ = conv_warmup(input)
     
 
     torch.cuda.synchronize()
     start=time.time()
+    # print("--------")
 
     torch.cuda.cudart().cudaProfilerStart()
     for _ in range(iter_num):
-        # cuda_module.torch_launch_tag_profiling()
 
         with torch.no_grad():
 
             output = conv(input)
+
     torch.cuda.cudart().cudaProfilerStop()
 
-        # cuda_module.torch_launch_tag_profiling()
-    
     
     torch.cuda.synchronize()
     end=time.time()

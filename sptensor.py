@@ -10,12 +10,13 @@ class spTensor:
         self.feats = feats
         self.coords = coords
         self.mappat = list()
+        self.snnz: Dict[int] = {}
         self.imap: Dict[int] = {}
         self.omap: Dict[int] = {}
+        self.icsr: Dict[int] = {}
+        self.ocsr: Dict[int] = {}
         self.knnz: Dict[int] = {}
         self.kpos: Dict[int] = {}
-        self.gbuf: Dict[int] = {}
-        self.sbuf: Dict[int] = {}
     
     @property
     def F(self) -> torch.FloatTensor:

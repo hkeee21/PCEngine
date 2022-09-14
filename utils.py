@@ -1,5 +1,5 @@
 import open3d as o3d
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Dict
 from itertools import repeat
 import numpy as np
 import torch
@@ -49,6 +49,28 @@ def sparse_quantize(coords,
     if return_inverse:
         outputs += [inverse_indices]
     return outputs[0] if len(outputs) == 1 else outputs
+
+
+def build_conv_buffer(channel_list: Dict,
+                    nnz: int, 
+                    device):
+
+    max_c_in = max(channel_list["in"])
+    max_c_out = max(channel_list["out"])
+    max_ks = max(channel_list["kernel"])
+
+    if max_ks == 3:
+        buffer_size = (max_c_in + max_c_out) * nnz * 10
+    elif max_ks == 5:
+        buffer_size = (max_c_in + max_c_out) * nnz * 36
+    elif max_ks == 2:
+        buffer_size = (max_c_in + max_c_out) * nnz * 6
+    else:
+        buffer_size = (max_c_in + max_c_out) * nnz * (max_ks ** 3 - 1)
+
+    buffer = torch.zeros((buffer_size), dtype=torch.float, device=device)
+
+    return buffer
 
 
 def vanillaConv(nnz: int, 

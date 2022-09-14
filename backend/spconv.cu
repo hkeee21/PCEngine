@@ -14,13 +14,16 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
+#include <thrust/scan.h>
+#include <thrust/remove.h>
+#include <thrust/execution_policy.h>
+
 #include "cublas_utils.h"
 
 using namespace std;
 
 #define PAR_THREAD 256
 #define DIV_UP(x, y) (x + y - 1) / y
-#define SHM_CAL(n, k) n * (k - 1) + 1   
 
 
 extern "C"
@@ -28,14 +31,15 @@ extern "C"
 void ConvolutionForward(const at::Tensor in_feats, 
                         const at::Tensor kernel, 
                         const int k_size, 
+                        const int sum_nnz, 
                         at::Tensor out_feats, 
                         const at::Tensor kernel_nnz, 
+                        const at::Tensor kernel_pos, 
                         const at::Tensor in_map, 
                         const at::Tensor out_map, 
                         const at::Tensor in_csr, 
                         const at::Tensor out_csr, 
-                        at::Tensor gather_buffer, 
-                        at::Tensor scatter_buffer, 
+                        at::Tensor buffer, 
                         const bool TensorCoreMode
                         ){
     
@@ -57,23 +61,33 @@ void ConvolutionForward(const at::Tensor in_feats,
     int *in_csr_ptr = in_csr.data_ptr<int>();
     int *out_csr_ptr = out_csr.data_ptr<int>();
 
-    // int *kernel_pos_ptr = kernel_pos.data_ptr<int>();
+    int *kpos_ptr = kernel_pos.data_ptr<int>();
 
-    // int max_nnz = kernel_nnz.max().item<int>();
-    // int max_nnz_mod = ceil((double)max_nnz / (double)WMMA_SIZE) * WMMA_SIZE;
-    // int sum_nnz = gather_buffer.size(0);
+    // int sum_nnz = in_buffer.size(0);
+    int buffer_offset = sum_nnz * in_channel;
 
-    float *gfeats_ptr = gather_buffer.data_ptr<float>();
-    float *sfeats_ptr = scatter_buffer.data_ptr<float>();
+    float *buf_ptr = buffer.data_ptr<float>();
 
     // cublas
     const float alpha = 1.0;
     const float beta = 0.0;
- 
-    cublasHandle_t cublasH = at::cuda::getCurrentCUDABlasHandle();
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
-    CUBLAS_CHECK(cublasSetStream(cublasH, stream));
+    cublasHandle_t cublasH = at::cuda::getCurrentCUDABlasHandle();
+
+    /********************************************************************/
+    // create the streams
+    int n_stream = 2;
+
+    cudaStream_t *pl_stream;
+    pl_stream = (cudaStream_t *)new cudaStream_t[n_stream];
+    
+    for (int i = 0; i < n_stream; i++) {
+        cudaStreamCreateWithFlags(&pl_stream[i], cudaStreamNonBlocking);
+    }
+
+    /********************************************************************/
+    // created stream 0
+    CUBLAS_CHECK(cublasSetStream(cublasH, pl_stream[0]));
 
     // stride = 1
     int mid_nnz = nnz;
@@ -151,16 +165,26 @@ void ConvolutionForward(const at::Tensor in_feats,
             gfeats_ptr
     );*/
 
+    /********************************************************************/
+    // created stream 1
+
     gather_all_input_major_csr_template<2, 2, 16>
-        <<<DIV_UP(nnz, 2), dim3(2, 16, 2)>>>(
+        <<<DIV_UP(nnz, 2), dim3(2, 16, 2), 0, pl_stream[1]>>>(
             nnz,
             k_vol, 
             in_channel,
             in_feats_ptr,
+            kpos_ptr, 
             in_csr_ptr, 
             in_map_ptr,
-            gfeats_ptr
+            buf_ptr
     );
+
+    cudaEvent_t K_gather_done;
+    cudaEventCreateWithFlags(&K_gather_done, cudaEventDisableTiming);
+    cudaEventRecord(K_gather_done, pl_stream[1]);
+
+    cudaStreamWaitEvent(pl_stream[0], K_gather_done);
 
     /*gather_all_input_major_csr_balance<64, 8, 16>
         <<<DIV_UP(sum_nnz, 64), dim3(8, 16)>>>(
@@ -174,6 +198,7 @@ void ConvolutionForward(const at::Tensor in_feats,
             gfeats_ptr
     );*/
 
+    /********************************************************************/
     // loop over all kernel offsets
     int cur_idx = 0;
 
@@ -187,6 +212,9 @@ void ConvolutionForward(const at::Tensor in_feats,
         if (cur_nnz == 0){continue;}
 
         int weight_id = i < k_vol / 2 ? i : i + 1;
+        int stream_id = i % n_stream;
+
+        CUBLAS_CHECK(cublasSetStream(cublasH, pl_stream[stream_id]));
 
         // cublas GEMM for matmul
         if (TensorCoreMode){
@@ -194,9 +222,9 @@ void ConvolutionForward(const at::Tensor in_feats,
                     out_channel, cur_nnz, in_channel, 
                     &alpha, 
                     &weight_ptr[weight_id * in_channel * out_channel], CUDA_R_32F, out_channel, 
-                    &gfeats_ptr[cur_idx * in_channel], CUDA_R_32F, in_channel, 
+                    &buf_ptr[cur_idx * in_channel], CUDA_R_32F, in_channel, 
                     &beta, 
-                    &sfeats_ptr[cur_idx * out_channel], CUDA_R_32F, out_channel,
+                    &buf_ptr[buffer_offset + cur_idx * out_channel], CUDA_R_32F, out_channel,
                     CUBLAS_COMPUTE_32F_FAST_16F,
                     CUBLAS_GEMM_DEFAULT_TENSOR_OP));
         }
@@ -205,13 +233,18 @@ void ConvolutionForward(const at::Tensor in_feats,
                     out_channel, cur_nnz, in_channel, 
                     &alpha, 
                     &weight_ptr[weight_id * in_channel * out_channel], out_channel, 
-                    &gfeats_ptr[cur_idx * in_channel], in_channel, 
+                    &buf_ptr[cur_idx * in_channel], in_channel, 
                     &beta, 
-                    &sfeats_ptr[cur_idx * out_channel], out_channel));
+                    &buf_ptr[buffer_offset + cur_idx * out_channel], out_channel));
         }
 
         cur_idx += cur_nnz;
     }
+
+    cudaDeviceSynchronize();
+    for (int i = 0; i < n_stream; i++) {
+        cudaStreamDestroy(pl_stream[i]);
+    } 
 
     // size_t const block_s = out_channel > PAR_THREAD ? out_channel : PAR_THREAD;
     // size_t const grid_s = (nnz * (out_channel) + block_s - 1) / block_s;
@@ -227,9 +260,14 @@ void ConvolutionForward(const at::Tensor in_feats,
             out_feats_ptr
     );*/
 
-    scatter_all_output_major_csr_template2<4, 2, 64>
-        <<<DIV_UP(nnz, 4), dim3(64, 2, 4)>>>(
-            nnz, k_vol, out_channel, sfeats_ptr, 
+    /*scatter_all_output_major_csr_template2<4, 2, 64>
+        <<<DIV_UP(nnz, 4), dim3(64, 2, 4), 0, 0>>>(
+            nnz, k_vol, out_channel, &buf_ptr[buffer_offset], kpos_ptr, 
+            out_csr_ptr, out_map_ptr, out_feats_ptr);*/
+    
+    scatter_all_output_major_csr_t4k1<4, 32>
+        <<<DIV_UP(nnz, 4), dim3(32, 4), 0, 0>>>(
+            nnz, k_vol, out_channel, &buf_ptr[buffer_offset], kpos_ptr, 
             out_csr_ptr, out_map_ptr, out_feats_ptr);
 
     /*scatter_all_output_major_csr_predecoding<4, 2, 32>

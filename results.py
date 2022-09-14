@@ -4,9 +4,9 @@ from typing import List, Tuple, Union
 from itertools import repeat
 import time
 from torch.utils.cpp_extension import load
-from torchsparse.utils.quantize import sparse_quantize
 from utils import CheckResultsWeight, sparse_quantize, load_file, vanillaConv, CheckResults, vanillaConvBackward
 # from hashcublas.backend import mapping_cuda, conv_fwd_cuda
+
 
 hash_module = load(name="mapping_cuda",
                    sources=["backend/pybind_hash.cpp", 
@@ -19,10 +19,19 @@ conv_module = load(name="conv_fwd_cuda",
                    "backend/spconv.cu"],
                    verbose=True)
 
+'''
+conv_hashmap_module = load(
+                name="conv_fwd_cuda_hashmap",
+                sources=["backend/pybind_ConvHash.cpp", 
+                "backend/spconv.cu"],
+                verbose=True
+)
+
+
 conv_back_module = load(name="conv_bwd_cuda",
                     sources=["backend/pybind_conv_back.cpp",
                     "backend/spconv.cu"],
-                    verbose=True)
+                    verbose=True)'''
 
 
 if __name__ == '__main__': 
@@ -56,9 +65,9 @@ if __name__ == '__main__':
 
     '''
     # real data test
-    input_channel, kernel_size = 16, 3
+    input_channel, kernel_size = 16, 5
 
-    coord, _, pcd = load_file("/home/hongke21/nfs/MinkowskiEngine/MinkowskiEngine/examples/1.ply")
+    coord, _, pcd = load_file("data/1.ply")
     coord -= np.min(coord, axis=0, keepdims=True)
     voxel_size = 0.4
     coords, indices = sparse_quantize(coord, voxel_size, return_index=True)
@@ -76,30 +85,79 @@ if __name__ == '__main__':
 
     # map and output, for mem allocation observation
     dev_output = torch.zeros((input_nnz, output_channel), dtype=torch.float).to(device)
-    dev_imap = - torch.ones((input_nnz, (kernel_size ** 3 - 1)), dtype=torch.int).to(device)
-    dev_omap = - torch.ones((input_nnz, (kernel_size ** 3 - 1)), dtype=torch.int).to(device)
-    dev_knnz = torch.zeros((kernel_size ** 3 - 1), dtype=torch.int).to(device)
+    dev_imap = - torch.ones((input_nnz * (kernel_size ** 3 - 1)), dtype=torch.int).to(device)
+    dev_omap = - torch.ones((input_nnz * (kernel_size ** 3 - 1)), dtype=torch.int).to(device)
+    dev_knnz = torch.zeros((kernel_size ** 3), dtype=torch.int).to(device)
+    dev_kpos = torch.zeros((kernel_size ** 3), dtype=torch.int).to(device)
+    dev_icsr = torch.zeros((input_nnz + 2), dtype=torch.int).to(device)
+    dev_ocsr = torch.zeros((input_nnz + 2), dtype=torch.int).to(device)
+    # dev_gbuf = torch.zeros((input_nnz * 20, input_channel), dtype=torch.float).to(device)
+    # dev_sbuf = torch.zeros((input_nnz * 20, output_channel), dtype=torch.float).to(device)
     
     # torch.cuda.cudart().cudaProfilerStart()
 
     # forward validation
-
-    hash_module.mapping_cuda(
-        dev_coords,
-        kernel_size,
-        dev_imap,
-        dev_omap,  
-        dev_knnz
+    '''
+    conv_hashmap_module.conv_fwd_cuda_hashmap(
+        dev_coords, dev_feats, dev_weights, kernel_size, dev_imap,
+        dev_omap, dev_icsr, dev_ocsr, dev_knnz, dev_kpos, 
+        dev_gbuf, dev_sbuf, dev_output, 0
     )
 
-    dev_kpos = torch.zeros((kernel_size ** 3 - 1), dtype=torch.int).to(device)
-    for k in range(kernel_size ** 3 - 2):
-        dev_kpos[k + 1] = dev_kpos[k] + dev_knnz[k]
+    print('Sparse Conv with Hashmap Done.')
 
-    sum_nnz = dev_knnz.sum()
-    dev_gbuf = torch.zeros((sum_nnz, input_channel), dtype=torch.float).to(device)
-    dev_sbuf = torch.zeros((sum_nnz, output_channel), dtype=torch.float).to(device)
+    
+    vani_output = vanillaConv(
+        nnz=input_nnz,
+        c_in=input_channel,
+        c_out=output_channel,
+        in_c=coords,
+        in_f=feats,
+        kv=weights,
+        ks=kernel_size
+    )
 
+    print('Vanilla Conv Done.')
+
+    output_array = dev_output.clone().cpu().numpy()
+    accu_error = CheckResults(
+        len=input_nnz * output_channel,
+        c_out=output_channel,
+        results1=output_array,
+        results2=vani_output
+    )
+
+    print('The accumulated abs error: %.4f' % accu_error)
+
+    '''
+
+    sum_nnz = hash_module.mapping_cuda(
+        dev_coords,
+        kernel_size,
+        input_channel, 
+        output_channel, 
+        dev_imap,
+        dev_omap,
+        dev_icsr, 
+        dev_ocsr,   
+        dev_knnz,
+        dev_kpos
+    )
+
+    # print(dev_buf.shape)
+    # dev_kpos = torch.zeros((kernel_size ** 3 - 1), dtype=torch.int).to(device)
+    # for k in range(kernel_size ** 3 - 2):
+    #     dev_kpos[k + 1] = dev_kpos[k] + dev_knnz[k]
+    # dev_kpos = torch.matmul(dev_knnz.float(), torch.triu(torch.ones(kernel_size ** 3 - 1, \
+    #     kernel_size ** 3 - 1).to(device), diagonal=1)).int()
+    
+    # print(dev_imap.shape)
+    # print(dev_omap.shape)
+
+    # sum_nnz = dev_icsr[input_nnz].cpu()
+
+    dev_buf = torch.zeros((sum_nnz, (input_channel + output_channel)), dtype=torch.float).to(device)
+    
     tensorcore_16F = 0
 
     with torch.no_grad(): 
@@ -107,20 +165,22 @@ if __name__ == '__main__':
             dev_feats,
             dev_weights,
             kernel_size,
+            sum_nnz, 
             dev_output,
-            dev_knnz,
+            dev_knnz.cpu(),
             dev_kpos, 
             dev_imap,
             dev_omap,
-            dev_gbuf, 
-            dev_sbuf, 
+            dev_icsr, 
+            dev_ocsr, 
+            dev_buf, 
             tensorcore_16F
         )
     
     print('Sparse Conv Done.')
 
     # torch.cuda.cudart().cudaProfilerStop()
-    '''
+    
     vani_output = vanillaConv(
         nnz=input_nnz,
         c_in=input_channel,
@@ -145,18 +205,22 @@ if __name__ == '__main__':
     print('The accumulated abs error: %.4f' % accu_error)
     
     
+    '''
     in_map = dev_imap.clone().detach().cpu().numpy()
     out_map = dev_omap.clone().detach().cpu().numpy()
 
     print("input map")
     for i in range(input_nnz):
-        for k in range((kernel_size ** 3 - 1)):
+        k = dev_icsr[i]
+        while(k < dev_icsr[i + 1]):
             # if (in_map[i, k] == -1):
             #     break
-            print("%d - %d - %d" % (in_map[i, k], in_map[i, k] / 1186111, in_map[i, k] % 1186111))
+            print("%d" % (in_map[k]))
+            k += 1
         
         print("----------")
-    '''
+    
+    
 
     # backward validation
     output_grad = np.random.uniform(0, 1, size=(input_nnz, output_channel))
@@ -212,9 +276,10 @@ if __name__ == '__main__':
         results2=weights_grad
     )
 
-
     print('The accumulated abs error of input gradients: %.4f' % in_grad_error)
     print('The accumulated abs error of weights gradients: %.4f' % weights_grad_error)
+
+    '''
     
 
 

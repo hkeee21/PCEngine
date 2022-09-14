@@ -589,6 +589,42 @@ __global__ void scatter_all_output_major_csr_template(
 }
 
 
+template <int _NNZS_PER_BLOCK, int _CHNS_THREADS>
+__global__ void scatter_all_output_major_csr_t1k1(
+                    const int nnz, 
+                    const int kv, 
+                    const int total_knnz, 
+                    const int *__restrict__ knnz_pos, 
+                    const int c_out, 
+                    const float *__restrict__ s_f, 
+                    const int *__restrict__ ocsr, 
+                    const int *__restrict__ omap, 
+                    float *out_f){
+    // id-th nnz
+    const int id = blockIdx.x * _NNZS_PER_BLOCK + threadIdx.y;  
+    if (id >= nnz){return;}
+    const int m_start = __ldg(&ocsr[id]);
+    const int m_end = __ldg(&ocsr[id + 1]);
+#pragma unroll
+    for (int k = m_start; k < m_end; k++){
+        // m_start <= k < m_end
+        int kinf = __ldg(&omap[k]);
+        // which kernel offset
+        int kofs = kernel_decoder(kinf);
+        int buf_ofs = kernel_map_decoder(kinf);
+        int buf_start = __ldg(&knnz_pos[kofs]);
+        int buf_pos = buf_start + buf_ofs;
+#pragma unroll
+        for (int c = 0; ; c += _CHNS_THREADS){
+            // which output channel
+            int cp = c + threadIdx.x;
+            if (cp >= c_out){break;}
+            out_f[id * c_out + cp] += s_f[buf_pos * c_out + cp];
+        }
+    }
+}
+
+
 template <int _MPNS_PER_BLOCK, int _KOFS_THREADS, 
     int _CHNS_THREADS>
 __global__ void scatter_all_output_major_csr_balance(
@@ -651,13 +687,13 @@ __global__ void scatter_all_output_major_csr_template3(
     const int m_end = __ldg(&ocsr[id + 1]);
     // working space
     __shared__ float shm[(_NNZS_PER_BLOCK * _CHNS_THREADS 
-        * _KOFS_THREADS) * 4 + 1];
+        * _KOFS_THREADS) << 2];
     int working_offset = (threadIdx.z * _CHNS_THREADS * _KOFS_THREADS + 
-            threadIdx.y * _KOFS_THREADS + threadIdx.x) << 2;
+            threadIdx.x * _KOFS_THREADS + threadIdx.y) << 2;
 #pragma unroll
     for (int c = 0; ; c += _CHNS_THREADS){
         // which output channel
-        int cp = (c + threadIdx.y) << 2;
+        int cp = (c + threadIdx.x) << 2;
         if (cp >= c_out){break;}
         // accumlated value for id-th nnz's cp-th channel
 #pragma unroll
@@ -666,7 +702,7 @@ __global__ void scatter_all_output_major_csr_template3(
         }
 #pragma unroll
         for (int k = m_start; ; k += _KOFS_THREADS){
-            int kp = k + threadIdx.x;
+            int kp = k + threadIdx.y;
             // make sure  m_start <= kp < m_end
             if (kp >= m_end){break;}
             // which kernel offset
@@ -683,6 +719,56 @@ __global__ void scatter_all_output_major_csr_template3(
         for (int ofs = 0; ofs < 4; ofs++){
             atomicAdd(&(out_f[id * c_out + cp + ofs]), 
                 shm[working_offset + ofs]);
+        }
+    }   
+}
+
+
+template <int _NNZS_PER_BLOCK, int _CHNS_THREADS>
+__global__ void scatter_all_output_major_csr_t3k1(
+                    const int nnz, 
+                    const int kv, 
+                    const int total_knnz, 
+                    const int *__restrict__ knnz_pos, 
+                    const int c_out, 
+                    float *s_f, 
+                    const int *__restrict__ ocsr, 
+                    const int *__restrict__ omap, 
+                    float *out_f){
+    // id-th nnz
+    const int id = blockIdx.x * _NNZS_PER_BLOCK + threadIdx.y;  
+    if (id >= nnz){return;}
+    const int m_start = __ldg(&ocsr[id]);
+    const int m_end = __ldg(&ocsr[id + 1]);
+    // working space
+    __shared__ float shm[(_NNZS_PER_BLOCK * _CHNS_THREADS) << 2];
+    int working_offset = (threadIdx.y * _CHNS_THREADS + threadIdx.x) << 2;
+#pragma unroll
+    for (int c = 0; ; c += _CHNS_THREADS){
+        // which output channel
+        int cp = (c + threadIdx.x) << 2;
+        if (cp >= c_out){break;}
+        // accumlated value for id-th nnz's cp-th channel
+#pragma unroll
+        for (int ofs = 0; ofs < 4; ofs++){
+            shm[working_offset + ofs] = 0.0f;
+        }
+#pragma unroll
+        for (int k = m_start; k < m_end; k++){
+            // which kernel offset
+            int kinf = __ldg(&omap[k]);
+            int kofs = kernel_decoder(kinf);
+            int buf_ofs = kernel_map_decoder(kinf);
+            int buf_start = __ldg(&knnz_pos[kofs]);
+            int buf_pos = buf_start + buf_ofs;
+            _FLOAT4(shm[working_offset]) = addFLOAT4(
+                _FLOAT4(shm[working_offset]), 
+                _FLOAT4(s_f[buf_pos * c_out + cp]));
+        }
+#pragma unroll
+        for (int ofs = 0; ofs < 4; ofs++){
+            out_f[id * c_out + cp + ofs] += 
+                shm[working_offset + ofs];
         }
     }   
 }
@@ -734,6 +820,51 @@ __global__ void scatter_all_output_major_csr_template2(
         }
         atomicAdd(&out_f[id * c_out + cp], 
             shm[working_offset]);
+        // out_f[id * c_out + cp] += shm[working_offset];
+    }
+}
+
+
+template <int _NNZS_PER_BLOCK, int _CHNS_THREADS>
+__global__ void scatter_all_output_major_csr_t2k1(
+                    const int nnz, 
+                    const int kv, 
+                    const int total_knnz, 
+                    const int *__restrict__ knnz_pos, 
+                    const int c_out, 
+                    const float *__restrict__ s_f, 
+                    const int *__restrict__ ocsr, 
+                    const int *__restrict__ omap, 
+                    float *out_f){
+    // id-th nnz
+    const int id = blockIdx.x * _NNZS_PER_BLOCK + threadIdx.z;  
+    if (id >= nnz){return;}
+    const int m_start = __ldg(&ocsr[id]);
+    const int m_end = __ldg(&ocsr[id + 1]);
+    // working space
+    __shared__ float shm[_NNZS_PER_BLOCK * _CHNS_THREADS + 1];
+    int working_offset = threadIdx.z * _CHNS_THREADS + threadIdx.x;
+    // initialization
+    shm[working_offset] = 0;
+#pragma unroll
+    for (int c = 0; ; c += _CHNS_THREADS){
+        // which output channel
+        int cp = c + threadIdx.x;
+        if (cp >= c_out){break;}
+        // accumlated value for id-th nnz's cp-th channel
+        // float Acc = 0.0f;
+#pragma unroll
+        for (int k = m_start; k < m_end; k++){
+            // which kernel offset
+            int kinf = __ldg(&omap[k]);
+            int kofs = kernel_decoder(kinf);
+            int buf_ofs = kernel_map_decoder(kinf);
+            int buf_start = __ldg(&knnz_pos[kofs]);
+            int buf_pos = buf_start + buf_ofs;
+            shm[working_offset] += 
+                s_f[buf_pos * c_out + cp];
+        }
+        out_f[id * c_out + cp] += shm[working_offset];
     }
 }
 
@@ -787,6 +918,55 @@ __global__ void scatter_all_output_major_csr_template4(
         for (int ofs = 0; ofs < 4; ofs++){
             atomicAdd(&(out_f[id * c_out + cp + ofs]), 
                 acc[ofs]);
+        }
+    }   
+}
+
+
+template <int _NNZS_PER_BLOCK, int _CHNS_THREADS>
+__global__ void scatter_all_output_major_csr_t4k1(
+                    const int nnz, 
+                    const int kv, 
+                    const int total_knnz, 
+                    const int *__restrict__ knnz_pos, 
+                    const int c_out, 
+                    float *s_f, 
+                    const int *__restrict__ ocsr, 
+                    const int *__restrict__ omap, 
+                    float *out_f){
+    // id-th nnz
+    const int id = blockIdx.x * _NNZS_PER_BLOCK + threadIdx.y;  
+    if (id >= nnz){return;}
+    const int m_start = __ldg(&ocsr[id]);
+    const int m_end = __ldg(&ocsr[id + 1]);
+    // working space
+    float acc[4];
+#pragma unroll
+    for (int c = 0; ; c += _CHNS_THREADS){
+        // which output channel
+        int cp = (c + threadIdx.x) << 2;
+        if (cp >= c_out){break;}
+        // accumlated value for id-th nnz's cp-th channel
+        // initialization
+#pragma unroll
+        for (int ofs = 0; ofs < 4; ofs++){
+            acc[ofs] = 0.0f;
+        }
+#pragma unroll
+        for (int k = m_start; k < m_end; k++){
+            // which kernel offset
+            int kinf = __ldg(&omap[k]);
+            int kofs = kernel_decoder(kinf);
+            int buf_ofs = kernel_map_decoder(kinf);
+            int buf_start = __ldg(&knnz_pos[kofs]);
+            int buf_pos = buf_start + buf_ofs;
+            _FLOAT4(acc[0]) = addFLOAT4(
+                _FLOAT4(acc[0]), 
+                _FLOAT4(s_f[buf_pos * c_out + cp]));
+        }
+#pragma unroll
+        for (int ofs = 0; ofs < 4; ofs++){
+            out_f[id * c_out + cp + ofs] += acc[ofs];
         }
     }   
 }

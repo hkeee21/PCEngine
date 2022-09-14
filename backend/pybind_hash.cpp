@@ -6,6 +6,8 @@
 
 int mapping_cuda(at::Tensor in_coords, 
             const int k_size,
+            const int c_in, 
+            const int c_out, 
             at::Tensor imap,
             at::Tensor omap, 
             at::Tensor icsr,
@@ -15,7 +17,8 @@ int mapping_cuda(at::Tensor in_coords,
             ){
   at::DeviceGuard guard(in_coords.device());
 
-  return HashMap(in_coords, k_size, imap, omap, icsr, ocsr, kernel_nnz, kernel_pos);
+  return HashMap(in_coords, k_size, c_in, c_out, imap, omap, 
+    icsr, ocsr, kernel_nnz, kernel_pos);
 }
 
 
