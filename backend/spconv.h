@@ -10,7 +10,7 @@ extern "C"
 
 void ConvolutionForward(const at::Tensor in_feats, 
                         const at::Tensor kernel, 
-                        const int k_size, 
+                        const int kernel_size_code, 
                         const int sum_nnz, 
                         at::Tensor out_feats, 
                         const at::Tensor kernel_nnz,
@@ -20,6 +20,7 @@ void ConvolutionForward(const at::Tensor in_feats,
                         const at::Tensor in_csr, 
                         const at::Tensor out_csr, 
                         at::Tensor buffer, 
+                        const bool separate_mid, 
                         const bool TensorCoreMode
                         );
 

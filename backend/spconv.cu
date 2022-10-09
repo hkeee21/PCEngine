@@ -30,7 +30,7 @@ extern "C"
 
 void ConvolutionForward(const at::Tensor in_feats, 
                         const at::Tensor kernel, 
-                        const int k_size, 
+                        const int ksize_code, 
                         const int sum_nnz, 
                         at::Tensor out_feats, 
                         const at::Tensor kernel_nnz, 
@@ -40,18 +40,20 @@ void ConvolutionForward(const at::Tensor in_feats,
                         const at::Tensor in_csr, 
                         const at::Tensor out_csr, 
                         at::Tensor buffer, 
+                        const bool separate_mid, 
                         const bool TensorCoreMode
                         ){
     
     // printf("[SubmanifoldSparseConv] - Starts.\n");
 
-    int nnz = in_feats.size(0);
+    int in_nnz = in_feats.size(0);
+    int out_nnz = out_feats.size(0);
     int in_channel = in_feats.size(1);
     if (in_feats.size(1) != kernel.size(1)) {
         throw std::invalid_argument("Input feature size and kernel size mismatch");
     }
     int out_channel = kernel.size(2);
-    const int k_vol = k_size * k_size * k_size;
+    int k_vol = kernel.size(0);
 
     float *in_feats_ptr = in_feats.data_ptr<float>();
     float *weight_ptr = kernel.data_ptr<float>();
@@ -65,6 +67,13 @@ void ConvolutionForward(const at::Tensor in_feats,
 
     // int sum_nnz = in_buffer.size(0);
     int buffer_offset = sum_nnz * in_channel;
+    // printf("sum nnz: %d", sum_nnz);
+
+    int ksx = ksize_code / 311;
+    int ksy = (ksize_code - ksx * 311) / 17;
+    int ksz = ksize_code - ksx * 311 - ksy * 17;
+    int mid_weight_id = (ksx - 1) / 2 * ksy * ksz + 
+        (ksy - 1) / 2 * ksz + (ksz - 1) / 2;
 
     float *buf_ptr = buffer.data_ptr<float>();
 
@@ -75,49 +84,28 @@ void ConvolutionForward(const at::Tensor in_feats,
     cublasHandle_t cublasH = at::cuda::getCurrentCUDABlasHandle();
 
     /********************************************************************/
+    // default stream
+
+    gather_all_input_major_csr<<<DIV_UP(in_nnz, 4), 
+        dim3(DIV_UP(in_channel, 4), 2, 4), 0, 0>>>(
+            in_nnz,
+            in_channel,
+            in_feats_ptr,
+            kpos_ptr, 
+            in_csr_ptr, 
+            in_map_ptr,
+            buf_ptr
+    );
+
+    /********************************************************************/
     // create the streams
-    int n_stream = 2;
+    int n_stream = 4;
 
     cudaStream_t *pl_stream;
     pl_stream = (cudaStream_t *)new cudaStream_t[n_stream];
     
     for (int i = 0; i < n_stream; i++) {
-        cudaStreamCreateWithFlags(&pl_stream[i], cudaStreamNonBlocking);
-    }
-
-    /********************************************************************/
-    // created stream 0
-    CUBLAS_CHECK(cublasSetStream(cublasH, pl_stream[0]));
-
-    // stride = 1
-    int mid_nnz = nnz;
-
-    // computation for w[0, 0, 0]
-    if (TensorCoreMode){
-
-        CUBLAS_CHECK(cublasSetMathMode(cublasH, CUBLAS_TENSOR_OP_MATH));
-        
-        CUBLAS_CHECK(cublasGemmEx(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
-                    out_channel, mid_nnz, in_channel, 
-                    &alpha, 
-                    &weight_ptr[k_vol / 2 * in_channel * out_channel], CUDA_R_32F, out_channel, 
-                    in_feats_ptr, CUDA_R_32F, in_channel, 
-                    &beta, 
-                    out_feats_ptr, CUDA_R_32F, out_channel,
-                    CUBLAS_COMPUTE_32F_FAST_16F,
-                    CUBLAS_GEMM_DEFAULT_TENSOR_OP));
-    }
-    else{
-        CUBLAS_CHECK(cublasSgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
-                    out_channel, mid_nnz, in_channel, 
-                    &alpha, 
-                    &weight_ptr[k_vol / 2 * in_channel * out_channel], 
-                    out_channel, 
-                    in_feats_ptr, 
-                    in_channel, 
-                    &beta, 
-                    out_feats_ptr, 
-                    out_channel));
+        cudaStreamCreateWithFlags(&pl_stream[i], cudaStreamDefault);
     }
 
     // gather features
@@ -165,27 +153,6 @@ void ConvolutionForward(const at::Tensor in_feats,
             gfeats_ptr
     );*/
 
-    /********************************************************************/
-    // created stream 1
-
-    gather_all_input_major_csr_template<2, 2, 16>
-        <<<DIV_UP(nnz, 2), dim3(2, 16, 2), 0, pl_stream[1]>>>(
-            nnz,
-            k_vol, 
-            in_channel,
-            in_feats_ptr,
-            kpos_ptr, 
-            in_csr_ptr, 
-            in_map_ptr,
-            buf_ptr
-    );
-
-    cudaEvent_t K_gather_done;
-    cudaEventCreateWithFlags(&K_gather_done, cudaEventDisableTiming);
-    cudaEventRecord(K_gather_done, pl_stream[1]);
-
-    cudaStreamWaitEvent(pl_stream[0], K_gather_done);
-
     /*gather_all_input_major_csr_balance<64, 8, 16>
         <<<DIV_UP(sum_nnz, 64), dim3(8, 16)>>>(
             nnz,
@@ -204,14 +171,13 @@ void ConvolutionForward(const at::Tensor in_feats,
 
     // printf("The GemmEx is used here.\n");
     // Suppose an odd kernel size
-    for (int i = 0; i < k_vol - 1; i++){
+    for (int i = 0; i < k_vol; i++){
 
         int cur_nnz = kernel_nnz.data_ptr<int>()[i];
         
         // TODO: put the zero check into the scheduler
         if (cur_nnz == 0){continue;}
 
-        int weight_id = i < k_vol / 2 ? i : i + 1;
         int stream_id = i % n_stream;
 
         CUBLAS_CHECK(cublasSetStream(cublasH, pl_stream[stream_id]));
@@ -221,7 +187,7 @@ void ConvolutionForward(const at::Tensor in_feats,
             CUBLAS_CHECK(cublasGemmEx(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
                     out_channel, cur_nnz, in_channel, 
                     &alpha, 
-                    &weight_ptr[weight_id * in_channel * out_channel], CUDA_R_32F, out_channel, 
+                    &weight_ptr[i * in_channel * out_channel], CUDA_R_32F, out_channel, 
                     &buf_ptr[cur_idx * in_channel], CUDA_R_32F, in_channel, 
                     &beta, 
                     &buf_ptr[buffer_offset + cur_idx * out_channel], CUDA_R_32F, out_channel,
@@ -232,7 +198,7 @@ void ConvolutionForward(const at::Tensor in_feats,
             CUBLAS_CHECK(cublasSgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
                     out_channel, cur_nnz, in_channel, 
                     &alpha, 
-                    &weight_ptr[weight_id * in_channel * out_channel], out_channel, 
+                    &weight_ptr[i * in_channel * out_channel], out_channel, 
                     &buf_ptr[cur_idx * in_channel], in_channel, 
                     &beta, 
                     &buf_ptr[buffer_offset + cur_idx * out_channel], out_channel));
@@ -264,11 +230,6 @@ void ConvolutionForward(const at::Tensor in_feats,
         <<<DIV_UP(nnz, 4), dim3(64, 2, 4), 0, 0>>>(
             nnz, k_vol, out_channel, &buf_ptr[buffer_offset], kpos_ptr, 
             out_csr_ptr, out_map_ptr, out_feats_ptr);*/
-    
-    scatter_all_output_major_csr_t4k1<4, 32>
-        <<<DIV_UP(nnz, 4), dim3(32, 4), 0, 0>>>(
-            nnz, k_vol, out_channel, &buf_ptr[buffer_offset], kpos_ptr, 
-            out_csr_ptr, out_map_ptr, out_feats_ptr);
 
     /*scatter_all_output_major_csr_predecoding<4, 2, 32>
         <<<DIV_UP(nnz, 4), dim3(32, 2, 4)>>>(
@@ -279,6 +240,49 @@ void ConvolutionForward(const at::Tensor in_feats,
         <<<DIV_UP(sum_nnz, 128), dim3(16, 4)>>>(
             nnz, k_vol, sum_nnz, out_channel, sfeats_ptr, 
             out_csr_ptr, out_map_ptr, out_feats_ptr);*/
+
+    /********************************************************************/
+    // default stream
+
+    scatter_all_output_major_csr<<<DIV_UP(out_nnz, 4), 
+        dim3(DIV_UP(out_channel, 4), 4), 0, 0>>>(
+            out_nnz, out_channel, &buf_ptr[buffer_offset], kpos_ptr, 
+            out_csr_ptr, out_map_ptr, out_feats_ptr);
+
+
+    CUBLAS_CHECK(cublasSetStream(cublasH, 0));
+
+    if (separate_mid){
+    // computation for w[0, 0, 0]
+    // in_nnz == out_nnz
+    if (TensorCoreMode){
+
+        CUBLAS_CHECK(cublasSetMathMode(cublasH, CUBLAS_TENSOR_OP_MATH));
+        
+        CUBLAS_CHECK(cublasGemmEx(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
+                    out_channel, in_nnz, in_channel, 
+                    &alpha, 
+                    &weight_ptr[mid_weight_id * in_channel * out_channel], CUDA_R_32F, out_channel, 
+                    in_feats_ptr, CUDA_R_32F, in_channel, 
+                    &alpha, 
+                    out_feats_ptr, CUDA_R_32F, out_channel,
+                    CUBLAS_COMPUTE_32F_FAST_16F,
+                    CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    }
+    else{
+        CUBLAS_CHECK(cublasSgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
+                    out_channel, in_nnz, in_channel, 
+                    &alpha, 
+                    &weight_ptr[mid_weight_id * in_channel * out_channel], 
+                    out_channel, 
+                    in_feats_ptr, 
+                    in_channel, 
+                    &alpha, 
+                    out_feats_ptr, 
+                    out_channel));
+    }
+    }
+
 }
 
 

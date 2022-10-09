@@ -6,7 +6,7 @@
 
 void conv_fwd_cuda(const at::Tensor in_feats, 
                 const at::Tensor kernel, 
-                const int k_size,
+                const int kernel_size_code, 
                 const int sum_nnz, 
                 at::Tensor out_feats,
                 const at::Tensor kernel_nnz, 
@@ -16,13 +16,14 @@ void conv_fwd_cuda(const at::Tensor in_feats,
                 const at::Tensor in_csr, 
                 const at::Tensor out_csr, 
                 at::Tensor buffer, 
+                const bool separate_mid, 
                 const bool TensorCoreMode
                 ){
   at::DeviceGuard guard(in_feats.device());
   
-  ConvolutionForward(in_feats, kernel, k_size, sum_nnz, 
+  ConvolutionForward(in_feats, kernel, kernel_size_code, sum_nnz, 
     out_feats, kernel_nnz, kernel_pos, in_map, out_map, 
-    in_csr, out_csr, buffer, TensorCoreMode);
+    in_csr, out_csr, buffer, separate_mid, TensorCoreMode);
 }
 
 

@@ -1,10 +1,12 @@
+from math import ceil, floor
 import numpy as np
 import torch
 from typing import List, Tuple, Union
 from itertools import repeat
 import time
 from torch.utils.cpp_extension import load
-from utils import CheckResultsWeight, sparse_quantize, load_file, vanillaConv, CheckResults, vanillaConvBackward
+from script.utils import CheckResultsWeight, binary_search, sparse_quantize, \
+    load_file, vanillaConv, CheckResults, vanillaConvBackward
 # from hashcublas.backend import mapping_cuda, conv_fwd_cuda
 
 
@@ -64,99 +66,163 @@ if __name__ == '__main__':
     dev_feats = torch.tensor(feats, dtype=torch.float).to(device)
 
     '''
+    batchsize = 2
     # real data test
-    input_channel, kernel_size = 16, 5
+    input_channel, kernel_size = 16, [3, 2, 3]
+    kernel_size_code = 311 * kernel_size[0] + 17 * kernel_size[1] + kernel_size[2] 
+    kernel_volume = np.prod(kernel_size, dtype=int)
 
-    coord, _, pcd = load_file("data/1.ply")
+    coord, _, pcd = load_file("/home/hongke21/nfs/MinkowskiEngine/MinkowskiEngine/examples/1.ply")
     coord -= np.min(coord, axis=0, keepdims=True)
     voxel_size = 0.4
     coords, indices = sparse_quantize(coord, voxel_size, return_index=True)
     input_nnz = coords.shape[0]
     print('input nnz: %d' % input_nnz)
     feats = np.random.uniform(0, 1, size=(input_nnz, input_channel))
+    coords = torch.as_tensor(coords, dtype=torch.int)
+    feats = torch.as_tensor(feats, dtype=torch.float)
 
-    dev_coords = torch.tensor(coords, dtype=torch.int).to(device)
-    dev_feats = torch.tensor(feats, dtype=torch.float).to(device)
+    # we use batch index as the first dimension of coordinates
+    bcoords, bfeats = [], []
+    for b in range(batchsize):
+        batch = torch.full((input_nnz, 1),
+                           b, dtype=torch.int)
+        bcoords.append(torch.cat((batch, coords), dim=1))
+        bfeats.append(feats)
+    
+    coords = torch.cat(bcoords, dim=0)
+    feats = torch.cat(bfeats, dim=0)
 
+    dev_coords = coords.to(device)
+    dev_feats = feats.to(device)
+    
     # To generate the weights
-    output_channel = 32
-    weights = np.random.uniform(0, 1, size=(kernel_size ** 3, input_channel, output_channel))
+    output_channel = 16
+    weights = np.random.uniform(0, 1, size=(kernel_volume, input_channel, output_channel))
     dev_weights = torch.tensor(weights, dtype=torch.float).to(device)
 
     # map and output, for mem allocation observation
-    dev_output = torch.zeros((input_nnz, output_channel), dtype=torch.float).to(device)
-    dev_imap = - torch.ones((input_nnz * (kernel_size ** 3 - 1)), dtype=torch.int).to(device)
-    dev_omap = - torch.ones((input_nnz * (kernel_size ** 3 - 1)), dtype=torch.int).to(device)
-    dev_knnz = torch.zeros((kernel_size ** 3), dtype=torch.int).to(device)
-    dev_kpos = torch.zeros((kernel_size ** 3), dtype=torch.int).to(device)
-    dev_icsr = torch.zeros((input_nnz + 2), dtype=torch.int).to(device)
-    dev_ocsr = torch.zeros((input_nnz + 2), dtype=torch.int).to(device)
-    # dev_gbuf = torch.zeros((input_nnz * 20, input_channel), dtype=torch.float).to(device)
-    # dev_sbuf = torch.zeros((input_nnz * 20, output_channel), dtype=torch.float).to(device)
-    
-    # torch.cuda.cudart().cudaProfilerStart()
+    dev_imap = - torch.ones((batchsize * input_nnz * kernel_volume), dtype=torch.int).to(device)
+    dev_omap = - torch.ones((batchsize * input_nnz * kernel_volume), dtype=torch.int).to(device)
+    dev_knnz = torch.zeros((kernel_volume), dtype=torch.int).to(device)
+    dev_kpos = torch.zeros((kernel_volume), dtype=torch.int).to(device)
+    dev_icsr = torch.zeros((batchsize * input_nnz + 2), dtype=torch.int).to(device)
+    dev_ocsr = torch.zeros((batchsize * input_nnz + 2), dtype=torch.int).to(device)
 
+    layer_stride = [1, 1, 1]
+    layer_stride_code = 311 * layer_stride[0] + 17 * layer_stride[1] + layer_stride[2]
+    # make sure the input coordinates are at least tensor stride away from each other
+    # TODO: can be further fused into the random data generator
+    tensor_stride = [1, 1, 1]
+    tensor_stride_code = 311 * tensor_stride[0] + 17 * tensor_stride[1] + tensor_stride[2]
+
+    separate_mid = (layer_stride[0] * layer_stride[1] * layer_stride[2]) == 1
+
+    print(separate_mid)
+
+    
     # forward validation
-    '''
-    conv_hashmap_module.conv_fwd_cuda_hashmap(
-        dev_coords, dev_feats, dev_weights, kernel_size, dev_imap,
-        dev_omap, dev_icsr, dev_ocsr, dev_knnz, dev_kpos, 
-        dev_gbuf, dev_sbuf, dev_output, 0
-    )
 
-    print('Sparse Conv with Hashmap Done.')
-
-    
-    vani_output = vanillaConv(
-        nnz=input_nnz,
-        c_in=input_channel,
-        c_out=output_channel,
-        in_c=coords,
-        in_f=feats,
-        kv=weights,
-        ks=kernel_size
-    )
-
-    print('Vanilla Conv Done.')
-
-    output_array = dev_output.clone().cpu().numpy()
-    accu_error = CheckResults(
-        len=input_nnz * output_channel,
-        c_out=output_channel,
-        results1=output_array,
-        results2=vani_output
-    )
-
-    print('The accumulated abs error: %.4f' % accu_error)
-
-    '''
-
-    sum_nnz = hash_module.mapping_cuda(
+    dev_out_coords = hash_module.mapping_cuda(
         dev_coords,
-        kernel_size,
+        kernel_size_code,
+        kernel_volume, 
         input_channel, 
         output_channel, 
+        layer_stride_code,
+        tensor_stride_code, 
         dev_imap,
         dev_omap,
         dev_icsr, 
         dev_ocsr,   
         dev_knnz,
-        dev_kpos
+        dev_kpos, 
+        separate_mid
     )
 
-    # print(dev_buf.shape)
-    # dev_kpos = torch.zeros((kernel_size ** 3 - 1), dtype=torch.int).to(device)
-    # for k in range(kernel_size ** 3 - 2):
-    #     dev_kpos[k + 1] = dev_kpos[k] + dev_knnz[k]
-    # dev_kpos = torch.matmul(dev_knnz.float(), torch.triu(torch.ones(kernel_size ** 3 - 1, \
-    #     kernel_size ** 3 - 1).to(device), diagonal=1)).int()
+    knnz = dev_knnz.cpu()
+    sum_nnz = knnz.sum().int()
+
+    print("sum nnz : %d" % sum_nnz)
     
-    # print(dev_imap.shape)
-    # print(dev_omap.shape)
+    l = dev_out_coords.size(0)
+    dev_output = torch.zeros((l, output_channel), dtype=torch.float).to(device)
 
-    # sum_nnz = dev_icsr[input_nnz].cpu()
+    print("output nnz : %d" % l)
 
-    dev_buf = torch.zeros((sum_nnz, (input_channel + output_channel)), dtype=torch.float).to(device)
+    '''
+    
+    out_coords = dev_out_coords.clone().cpu().numpy()
+    for i in range(l):
+        print("(%d, %d, %d)" % (out_coords[i, 0], out_coords[i, 1], out_coords[i, 2]))
+
+    print("------------------------")
+
+    print(dev_knnz)
+    print(dev_kpos)
+    
+    
+
+    in_map = dev_imap.clone().detach().cpu().numpy()
+    out_map = dev_omap.clone().detach().cpu().numpy()
+
+    print("input map")
+    for i in range(input_nnz):
+        k = dev_icsr[i]
+        while(k < dev_icsr[i + 1]):
+            # if (in_map[i, k] == -1):
+            #     break
+            print("%d - %d" % (in_map[k] / 1186111, in_map[k] % 1186111))
+            k += 1
+        
+        print("----------")
+
+    print("--------------------------------------------")
+
+    print("output map")
+    for i in range(l):
+        k = dev_ocsr[i]
+        while(k < dev_ocsr[i + 1]):
+            # if (in_map[i, k] == -1):
+            #     break
+            print("%d - %d" % (out_map[k] / 1186111, out_map[k] % 1186111))
+            k += 1
+        
+        print("----------")
+
+    print("--------------------------------------------")
+    print("%d - %d" % (dev_icsr[input_nnz], dev_ocsr[l]))
+
+    
+    
+    # some testings on the workload balance idea
+    icsr = dev_icsr.clone().cpu().numpy()
+
+    
+    print("input map")
+    for i in range(input_nnz):
+        print("%d" % (icsr[i + 1] - icsr[i]))
+
+    _MPNS_PER_BLOCK = 48
+    block_num = ceil(sum_nnz / _MPNS_PER_BLOCK) 
+    for b in range(block_num):
+        m_start = b * _MPNS_PER_BLOCK
+        m_end = m_start + _MPNS_PER_BLOCK
+        if (m_end > sum_nnz):
+            m_end = sum_nnz
+        id_start = binary_search(icsr, m_start, 0, input_nnz - 1)
+        id_end = id_start + 1
+        while(icsr[id_end] < m_end):
+            id_end += 1
+        if (m_end - icsr[id_end - 1] <= icsr[id_end] - m_end):
+            id_end -= 1
+        # id_end = binary_search(icsr, m_end, 0, input_nnz - 1)
+        print("%d-%d %d-%d (%d)" % (id_start, id_end, icsr[id_start], icsr[id_end] - 1, icsr[id_end] - icsr[id_start]))
+        # print("%d" % (icsr[id_end] - icsr[id_start]))
+    
+    '''
+
+    dev_buf = torch.zeros((input_nnz * 10 * (input_channel + output_channel), ), dtype=torch.float).to(device)
     
     tensorcore_16F = 0
 
@@ -164,16 +230,17 @@ if __name__ == '__main__':
         conv_module.conv_fwd_cuda(
             dev_feats,
             dev_weights,
-            kernel_size,
+            kernel_size_code, 
             sum_nnz, 
             dev_output,
-            dev_knnz.cpu(),
+            knnz,
             dev_kpos, 
             dev_imap,
             dev_omap,
             dev_icsr, 
             dev_ocsr, 
             dev_buf, 
+            separate_mid, 
             tensorcore_16F
         )
     
@@ -182,9 +249,9 @@ if __name__ == '__main__':
     # torch.cuda.cudart().cudaProfilerStop()
     
     vani_output = vanillaConv(
-        nnz=input_nnz,
         c_in=input_channel,
         c_out=output_channel,
+        stride=layer_stride, 
         in_c=coords,
         in_f=feats,
         kv=weights,
@@ -193,10 +260,11 @@ if __name__ == '__main__':
 
     print('Vanilla Conv Done.')
 
+    
     # results checking
     output_array = dev_output.clone().cpu().numpy()
     accu_error = CheckResults(
-        len=input_nnz * output_channel,
+        len=l * output_channel,
         c_out=output_channel,
         results1=output_array,
         results2=vani_output
@@ -204,8 +272,10 @@ if __name__ == '__main__':
 
     print('The accumulated abs error: %.4f' % accu_error)
     
-    
     '''
+    
+    # mapping check
+
     in_map = dev_imap.clone().detach().cpu().numpy()
     out_map = dev_omap.clone().detach().cpu().numpy()
 
@@ -219,7 +289,6 @@ if __name__ == '__main__':
             k += 1
         
         print("----------")
-    
     
 
     # backward validation

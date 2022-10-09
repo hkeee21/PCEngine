@@ -8,14 +8,19 @@
 
 extern "C"
 
-int HashMap(at::Tensor in_coords, 
-                const int k_size,
+at::Tensor HashMap(
+                const at::Tensor in_coords, 
+                const int k_size_code, 
+                const int k_vol, 
                 const int c_in, 
                 const int c_out, 
+                const int l_stride_code, 
+                const int t_stride_code, 
                 at::Tensor imap,
-                at::Tensor omap, 
+                at::Tensor omap,  
                 at::Tensor icsr,
                 at::Tensor ocsr,
                 at::Tensor kernel_nnz,
-                at::Tensor kernel_pos
+                at::Tensor kernel_pos,
+                const bool separate_mid
                 );

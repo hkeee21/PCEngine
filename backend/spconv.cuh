@@ -111,11 +111,46 @@ __global__ void gather_all_input_major_template(
 }
 
 
+__global__ void gather_all_input_major_csr(
+                    const int nnz, 
+                    const int c_in, 
+                    float *in_f, 
+                    const int *__restrict__ kpos, 
+                    const int *__restrict__ icsr, 
+                    const int *__restrict__ imap, 
+                    float *g_f){
+    // id-th nnz
+    const int id = blockIdx.x * blockDim.z + threadIdx.z;  
+    if (id >= nnz){return;}
+    const int m_start = __ldg(&icsr[id]);
+    const int m_end = __ldg(&icsr[id + 1]);
+#pragma unroll
+    for (int k = m_start; ; k += blockDim.y){
+        int kp = k + threadIdx.y;
+        // make sure  m_start <= kp < m_end
+        if (kp >= m_end){break;}
+        // read the buffer position 
+        int kinf = __ldg(&imap[kp]);
+        int kofs = kinf / 1186111;
+        int buf_ofs = kinf % 1186111;
+        int buf_start = __ldg(&kpos[kofs]);
+        int buf_pos = buf_start + buf_ofs;
+#pragma unroll
+        for (int c = 0; ; c += blockDim.x){
+            // which input channel
+            int cp = (c + threadIdx.x) << 2;
+            if (cp >= c_in){break;}
+            _FLOAT4(g_f[buf_pos * c_in + cp]) = 
+                _FLOAT4(in_f[id * c_in + cp]);
+        }
+    }
+}
+
+
 template <int _NNZS_PER_BLOCK, int _KOFS_THREADS, 
     int _CHNS_THREADS>
 __global__ void gather_all_input_major_csr_template(
                     const int nnz, 
-                    const int kv, 
                     const int c_in, 
                     float *in_f, 
                     const int *__restrict__ kpos, 
@@ -129,7 +164,7 @@ __global__ void gather_all_input_major_csr_template(
     const int m_end = __ldg(&icsr[id + 1]);
 #pragma unroll
     for (int k = m_start; ; k += _KOFS_THREADS){
-        int kp = k + threadIdx.x;
+        int kp = k + threadIdx.y;
         // make sure  m_start <= kp < m_end
         if (kp >= m_end){break;}
         // read the buffer position 
@@ -141,7 +176,7 @@ __global__ void gather_all_input_major_csr_template(
 #pragma unroll
         for (int c = 0; ; c += _CHNS_THREADS){
             // which input channel
-            int cp = (c + threadIdx.y) << 2;
+            int cp = (c + threadIdx.x) << 2;
             if (cp >= c_in){break;}
             _FLOAT4(g_f[buf_pos * c_in + cp]) = 
                 _FLOAT4(in_f[id * c_in + cp]);
@@ -576,7 +611,6 @@ __global__ void scatter_all_output_major_csr_predecoding(
 template <int _NNZS_PER_BLOCK, int _CHNS_THREADS>
 __global__ void scatter_all_output_major_csr_t4k1(
                     const int nnz, 
-                    const int kv, 
                     const int c_out, 
                     float *s_f, 
                     const int *__restrict__ kpos, 
@@ -613,10 +647,50 @@ __global__ void scatter_all_output_major_csr_t4k1(
                 _FLOAT4(acc[0]), 
                 _FLOAT4(s_f[buf_pos * c_out + cp]));
         }
+        _FLOAT4(out_f[id * c_out + cp]) = _FLOAT4(acc[0]);
+    }
+}
+
+
+__global__ void scatter_all_output_major_csr(
+                    const int nnz, 
+                    const int c_out, 
+                    float *s_f, 
+                    const int *__restrict__ kpos, 
+                    const int *__restrict__ ocsr, 
+                    const int *__restrict__ omap, 
+                    float *out_f){
+    // id-th nnz
+    const int id = blockIdx.x * blockDim.y + threadIdx.y;  
+    if (id >= nnz){return;}
+    const int m_start = __ldg(&ocsr[id]);
+    const int m_end = __ldg(&ocsr[id + 1]);
+    // working space
+    float acc[4];
+#pragma unroll
+    for (int c = 0; ; c += blockDim.x){
+        // which output channel
+        int cp = (c + threadIdx.x) << 2;
+        if (cp >= c_out){break;}
+        // accumlated value for id-th nnz's cp-th channel
+        // initialization
 #pragma unroll
         for (int ofs = 0; ofs < 4; ofs++){
-            out_f[id * c_out + cp + ofs] += acc[ofs];
+            acc[ofs] = 0.0f;
         }
-    }   
+#pragma unroll
+        for (int k = m_start; k < m_end; k++){
+            // which kernel offset
+            int kinf = __ldg(&omap[k]);
+            int kofs = kinf / 1186111;
+            int buf_ofs = kinf % 1186111;
+            int buf_start = __ldg(&kpos[kofs]);
+            int buf_pos = buf_start + buf_ofs;
+            _FLOAT4(acc[0]) = addFLOAT4(
+                _FLOAT4(acc[0]), 
+                _FLOAT4(s_f[buf_pos * c_out + cp]));
+        }
+        _FLOAT4(out_f[id * c_out + cp]) = _FLOAT4(acc[0]);
+    }
 }
 
