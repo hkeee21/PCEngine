@@ -58,6 +58,9 @@ class S3DISDataset(Dataset):
         print("Totally {} samples in the set.".format(len(self.room_idxs)))
 
     def __getitem__(self, idx):
+
+        np.random.seed(idx)
+        
         room_idx = self.room_idxs[idx]  #
         points = self.room_points[room_idx]   # N * 6 --》 debug 1112933,6
         labels = self.room_labels[room_idx]   # N
@@ -81,12 +84,12 @@ class S3DISDataset(Dataset):
         # normalize
         selected_points = points[selected_point_idxs, :]  # num_point * 6 拿到筛选后的4096个点
         current_points = np.zeros((self.num_point, 9))  # num_point * 9
-        current_points[:, 6] = (selected_points[:, 0] - self.room_coord_min[room_idx][0]) \
-            / (self.room_coord_max[room_idx][0] - self.room_coord_min[room_idx][0])
-        current_points[:, 7] = (selected_points[:, 1] - self.room_coord_min[room_idx][1]) \
-            / (self.room_coord_max[room_idx][1] - self.room_coord_min[room_idx][1])
-        current_points[:, 8] = (selected_points[:, 2] - self.room_coord_min[room_idx][2]) \
-            / (self.room_coord_max[room_idx][2] - self.room_coord_min[room_idx][2])
+        current_points[:, 6] = (selected_points[:, 0] - self.room_coord_min[room_idx][0]) / \
+            (self.room_coord_max[room_idx][0] - self.room_coord_min[room_idx][0])
+        current_points[:, 7] = (selected_points[:, 1] - self.room_coord_min[room_idx][1]) / \
+            (self.room_coord_max[room_idx][1] - self.room_coord_min[room_idx][1])
+        current_points[:, 8] = (selected_points[:, 2] - self.room_coord_min[room_idx][2]) / \
+            (self.room_coord_max[room_idx][2] - self.room_coord_min[room_idx][2])
         # selected_points[:, 0] = selected_points[:, 0] - center[0] # 再将坐标移至随机采样的中心点
         # selected_points[:, 1] = selected_points[:, 1] - center[1]
         selected_points[:, 3:6] /= 255.0 # 颜色信息归一化
@@ -95,8 +98,9 @@ class S3DISDataset(Dataset):
         if self.transform is not None:
             current_points, current_labels = self.transform(current_points, current_labels)
         
-        coords, feats = current_points[:, 0:3], current_points[:, 2:6]
-        coords, inds = sparse_quantize(coords, voxel_size=0.01, return_index=True)
+        coords, feats = current_points[:, 6:9], current_points[:, 2:6]
+        coords -= np.min(coords, axis=0, keepdims=True)
+        coords, inds = sparse_quantize(coords, voxel_size=0.005, return_index=True)
         coords = torch.as_tensor(coords, dtype=torch.int)
         feats = torch.as_tensor(feats[inds], dtype=torch.float)
         label = torch.as_tensor(current_labels[inds], dtype=torch.int)
@@ -105,4 +109,4 @@ class S3DISDataset(Dataset):
         return {'input': input, 'label': label}
 
     def __len__(self):
-        return len(self.room_points)
+        return len(self.room_idxs)

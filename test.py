@@ -4,9 +4,9 @@ from typing import List, Tuple, Union, Dict
 from itertools import repeat
 import time
 import argparse
-from utils import sparse_quantize, load_file, build_conv_buffer
-from spconv import conv3d
-from sptensor import spTensor
+from script.utils import sparse_quantize, load_file, build_conv_buffer
+from script.spconv import conv3d
+from script.sptensor import spTensor
 
 
 '''
@@ -63,7 +63,7 @@ if __name__ == '__main__':
         # real data test
         input_channel, kernel_size, output_channel = args.in_channels, args.kernel_size, args.out_channels
 
-        coord, _, pcd = load_file("data/1.ply")
+        coord, _, pcd = load_file("/home/hongke21/nfs/MinkowskiEngine/MinkowskiEngine/examples/1.ply")
         coord -= np.min(coord, axis=0, keepdims=True)
         voxel_size = 0.02
         coord, indices = sparse_quantize(coord, voxel_size, return_index=True)
@@ -73,11 +73,6 @@ if __name__ == '__main__':
         coords = torch.tensor(coord, dtype=torch.int)
         feats = torch.tensor(feat, dtype=torch.float)
     
-
-    #conv_warmup = conv3d(in_channels=input_channel,
-    #                    out_channels=output_channel,
-    #                    kernel_size=5
-    #).to(device)
     input = spTensor(feats, coords).to(device)
 
     cinfo = dict()
@@ -87,17 +82,26 @@ if __name__ == '__main__':
 
     buffer = build_conv_buffer(cinfo, input_nnz, device)
 
+    
     conv_warmup = conv3d(in_channels=input_channel,
                     out_channels=output_channel,
                     buffer=buffer,
                     kernel_size=5,
-                    tc_mode_16f=1).to(device)
+                    tc_mode_16f=0).to(device)
 
-    conv = conv3d(in_channels=input_channel,
+    conv1 = conv3d(in_channels=input_channel,
                 out_channels=output_channel,
                 buffer=buffer,
                 kernel_size=kernel_size, 
-                tc_mode_16f=1).to(device)
+                stride=2, 
+                tc_mode_16f=0).to(device)
+    
+    conv2 = conv3d(in_channels=output_channel,
+                out_channels=128,
+                buffer=buffer,
+                kernel_size=kernel_size, 
+                stride=2, 
+                tc_mode_16f=0).to(device)
 
     for _ in range(10):
         with torch.no_grad():
@@ -105,8 +109,8 @@ if __name__ == '__main__':
             _ = conv_warmup(input)
     
 
-    torch.cuda.synchronize()
-    start=time.time()
+    # torch.cuda.synchronize()
+    # start=time.time()
     # print("--------")
 
     torch.cuda.cudart().cudaProfilerStart()
@@ -114,16 +118,18 @@ if __name__ == '__main__':
 
         with torch.no_grad():
 
-            output = conv(input)
+            output = conv1(input)
+            output = conv2(output)
 
+    
     torch.cuda.cudart().cudaProfilerStop()
 
     
-    torch.cuda.synchronize()
-    end=time.time()
-    inf_time=(end-start)/iter_num
+    # torch.cuda.synchronize()
+    # end=time.time()
+    # inf_time=(end-start)/iter_num
 
-    print("Duration for a convolution operation : {:.4f} ms".format(inf_time * 1000))
+    # print("Duration for a convolution operation : {:.4f} ms".format(inf_time * 1000))
 
 
 

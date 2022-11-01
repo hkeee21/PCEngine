@@ -76,7 +76,7 @@ class ModelNet40Dataset(torch.utils.data.Dataset):
         self.transform = transform
 
         self.root = "/home/eva_data/hongke21/datasets/ModelNet40"
-        fnames = glob.glob(os.path.join(self.root, "bowl/test/*.off"))
+        fnames = glob.glob(os.path.join(self.root, "bookshelf/test/*.off"))
         fnames = sorted([os.path.relpath(fname, self.root) for fname in fnames])
         self.files = fnames
         assert len(self.files) > 0, "No file loaded"

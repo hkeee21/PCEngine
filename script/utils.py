@@ -252,37 +252,53 @@ def vanillaConv(
     return out
 
 
-def vanillaConvBackward(nnz: int,
+def vanillaConvBackward(innz: int,
+                        onnz: int, 
                         c_in: int, 
                         c_out: int, 
                         in_c, 
+                        out_c, 
                         in_f,
                         kw, 
-                        ks:int,
+                        ks:list,
                         out_f_g):
     
     in_f_g = np.zeros_like(in_f)
     kw_g = np.zeros_like(kw)
 
-    for i in range(nnz):
-        for j in range(nnz):
-            off_x = in_c[i, 0] - in_c[j, 0]
-            off_y = in_c[i, 1] - in_c[j, 1]
-            off_z = in_c[i, 2] - in_c[j, 2]
-            if (abs(off_x) <= ks // 2 and abs(off_y) <= ks // 2 and abs(off_z) <= ks // 2):
-                kid = (off_x + ks // 2) * ks * ks + (off_y + ks // 2) * ks + off_z + ks // 2
-                # W^T X {\delta{out_feats}} = {\delta{in_feats}}^T
-                for c in range(c_in):
-                    tv = 0
-                    for co in range(c_out):
-                        tv += kw[kid, c, co] * out_f_g[j, co]
+    print(in_c.shape)
+    print(out_c.shape)
+    print(in_f.shape)
+    print(kw.shape)
+    print(out_f_g.shape)
+
+    kofs_x = [(i - (ks[0] - 1) // 2) for i in range(ks[0])]
+    kofs_y = [(i - (ks[1] - 1) // 2) for i in range(ks[1])]
+    kofs_z = [(i - (ks[2] - 1) // 2) for i in range(ks[2])]
+
+    for i in range(innz):
+        for j in range(onnz):
+            if in_c[i, 0] == out_c[j, 0]:
+                off_x = in_c[i, 1] - out_c[j, 1]
+                off_y = in_c[i, 2] - out_c[j, 2]
+                off_z = in_c[i, 3] - out_c[j, 3]
+                if (off_x in kofs_x and off_y in kofs_y and off_z in kofs_z):
+
+                    kid = (off_x + (ks[0] - 1) // 2) * ks[1] * ks[2] \
+                        + (off_y + (ks[1] - 1) // 2) * ks[2] \
+                        + (off_z + (ks[2] - 1) // 2)
                     
-                    in_f_g[i, c] += tv
+                    # W^T X {\delta{out_feats}} = {\delta{in_feats}}^T
+                    for c in range(c_in):
+                        tv = 0
+                        for co in range(c_out):
+                            tv += kw[kid, c, co] * out_f_g[j, co]
+                        in_f_g[i, c] += tv
                 
-                # {\delta{out_feats}}^T X in_feats = {\delta{W}}^T
-                for c in range(c_in):
-                    for co in range(c_out):
-                        kw_g[kid, c, co] += in_f[i, c] * out_f_g[j, co]
+                    # {\delta{out_feats}}^T X in_feats = {\delta{W}}^T
+                    for c in range(c_in):
+                        for co in range(c_out):
+                            kw_g[kid, c, co] += in_f[i, c] * out_f_g[j, co]
     
     return in_f_g, kw_g
 

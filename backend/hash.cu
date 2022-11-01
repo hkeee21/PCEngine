@@ -97,7 +97,7 @@ at::Tensor HashMap(
 
         uint64_t *ocoords_code_ptr = (uint64_t *)ocoords_code_space.data_ptr<int64_t>();
 
-        coordsDownsample<<<DIV_UP(in_nnz, 16), dim3(16, 1, 1), 0, 0>>>(
+        coordsDownsample<2003><<<DIV_UP(in_nnz, 16), dim3(16, 1, 1), 0, 0>>>(
             in_nnz, stride_x, stride_y, stride_z, in_coords_ptr, ocoords_code_ptr
         );
 
@@ -113,7 +113,7 @@ at::Tensor HashMap(
         out_coords = torch::zeros({out_nnz, 4}, 
             at::device(in_coords.device()).dtype(at::ScalarType::Int));
         
-        coordsGenerator<<<DIV_UP(out_nnz, 16), dim3(16, 1, 1), 0, 0>>>(
+        coordsGenerator<2003><<<DIV_UP(out_nnz, 16), dim3(16, 1, 1), 0, 0>>>(
             out_nnz, ocoords_code_ptr, out_coords.data_ptr<int>()
         );
     }

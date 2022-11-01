@@ -168,10 +168,8 @@ class convF(Function):
                 tensorcore16F
             )
 
-    
-        # TODO: replace in_feats with gathered features in in_buffer
-        ctx.for_backwards = (in_feats, kernel, knnz, imap, omap, \
-            buffer, tensorcore16F)
+        ctx.for_backwards = (in_feats, kernel, kernel_size_code, sum_nnz, \
+            knnz, kpos, imap, omap, icsr, ocsr, buffer, transposed, tensorcore16F)
         
         return output_feats
 
@@ -180,8 +178,8 @@ class convF(Function):
     @custom_bwd
     def backward(ctx, out_feats_grad: torch.Tensor):
 
-        in_feats, kernel, kernel_size, knnz, kpos, imap, omap, \
-            in_buffer, out_buffer, tensorcore16F = ctx.for_backwards
+        in_feats, kernel, kernel_size_code, sum_nnz, knnz, kpos, imap, omap, \
+            icsr, ocsr, buffer, transposed, tensorcore16F = ctx.for_backwards
         
         input_size = in_feats.size(0)
         input_channel = in_feats.size(1)
@@ -193,24 +191,21 @@ class convF(Function):
         weight_grad = torch.zeros((kernel_volume, input_channel, output_channel), \
             dtype=torch.float, device=in_feats.device)
 
-        conv_bwd_cuda(
-            out_feats_grad, 
-            in_feats,
-            kernel,
-            kernel_size,
-            in_feats_grad, 
-            weight_grad, 
-            knnz,
-            kpos, 
-            imap,
-            omap,
-            in_buffer, 
-            out_buffer,  
-            tensorcore16F
-        )
+        if (transposed):
+            conv_bwd_cuda(
+                out_feats_grad, in_feats, kernel, kernel_size_code, sum_nnz, 
+                in_feats_grad, weight_grad, knnz, kpos, omap, imap, ocsr, icsr,  
+                buffer, tensorcore16F
+            )
+        else:
+            conv_bwd_cuda(
+                out_feats_grad, in_feats, kernel, kernel_size_code, sum_nnz, 
+                in_feats_grad, weight_grad, knnz, kpos, imap, omap, icsr, ocsr,  
+                buffer, tensorcore16F
+            )
 
-        return in_feats_grad, None, None, None, None, None, \
-            weight_grad, None, None, None, None
+        return in_feats_grad, None, None, None, None, None, None, None, None, \
+            weight_grad, None, None, None, None, None, None
 
 
 def conv_func(input, in_channel, out_channel, kernel, 
@@ -295,6 +290,7 @@ def conv_func(input, in_channel, out_channel, kernel,
 
             knnz = knnz.cpu()
             sum_nnz = knnz.sum().int()
+            print('sum nnz: %d' % sum_nnz)
             out_nnz = out_coords.size(0)
         
             if input.buffer.size(0) < sum_nnz * (in_channel + out_channel):

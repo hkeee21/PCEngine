@@ -21,19 +21,11 @@ conv_module = load(name="conv_fwd_cuda",
                    "backend/spconv.cu"],
                    verbose=True)
 
-'''
-conv_hashmap_module = load(
-                name="conv_fwd_cuda_hashmap",
-                sources=["backend/pybind_ConvHash.cpp", 
-                "backend/spconv.cu"],
-                verbose=True
-)
-
 
 conv_back_module = load(name="conv_bwd_cuda",
                     sources=["backend/pybind_conv_back.cpp",
                     "backend/spconv.cu"],
-                    verbose=True)'''
+                    verbose=True)
 
 
 if __name__ == '__main__': 
@@ -109,7 +101,7 @@ if __name__ == '__main__':
     dev_icsr = torch.zeros((batchsize * input_nnz + 2), dtype=torch.int).to(device)
     dev_ocsr = torch.zeros((batchsize * input_nnz + 2), dtype=torch.int).to(device)
 
-    layer_stride = [1, 1, 1]
+    layer_stride = [1, 2, 1]
     layer_stride_code = 311 * layer_stride[0] + 17 * layer_stride[1] + layer_stride[2]
     # make sure the input coordinates are at least tensor stride away from each other
     # TODO: can be further fused into the random data generator
@@ -149,10 +141,10 @@ if __name__ == '__main__':
     dev_output = torch.zeros((l, output_channel), dtype=torch.float).to(device)
 
     print("output nnz : %d" % l)
-
-    '''
     
     out_coords = dev_out_coords.clone().cpu().numpy()
+
+    '''
     for i in range(l):
         print("(%d, %d, %d)" % (out_coords[i, 0], out_coords[i, 1], out_coords[i, 2]))
 
@@ -222,7 +214,7 @@ if __name__ == '__main__':
     
     '''
 
-    dev_buf = torch.zeros((input_nnz * 10 * (input_channel + output_channel), ), dtype=torch.float).to(device)
+    dev_buf = torch.zeros((input_nnz * batchsize * 10 * (input_channel + output_channel), ), dtype=torch.float).to(device)
     
     tensorcore_16F = 0
 
@@ -290,37 +282,42 @@ if __name__ == '__main__':
         
         print("----------")
     
-
+    '''
     # backward validation
-    output_grad = np.random.uniform(0, 1, size=(input_nnz, output_channel))
+
+    output_grad = np.random.uniform(0, 1, size=(l, output_channel))
 
     dev_output_grad = torch.tensor(output_grad, dtype=torch.float).to(device)
-    dev_input_grad = torch.zeros((input_nnz, input_channel), dtype=torch.float).to(device)
-    dev_weight_grad = torch.zeros((kernel_size ** 3, input_channel, output_channel), dtype=torch.float).to(device)
+    dev_input_grad = torch.zeros((batchsize * input_nnz, input_channel), dtype=torch.float).to(device)
+    dev_weight_grad = torch.zeros((kernel_volume, input_channel, output_channel), dtype=torch.float).to(device)
 
     conv_back_module.conv_bwd_cuda(
         dev_output_grad, 
         dev_feats,
         dev_weights,
-        kernel_size,
+        kernel_size_code,
+        sum_nnz,
         dev_input_grad, 
         dev_weight_grad, 
-        dev_knnz,
+        knnz,
         dev_kpos, 
         dev_imap,
         dev_omap,
-        dev_gbuf, 
-        dev_sbuf,  
+        dev_icsr,
+        dev_ocsr,
+        dev_buf, 
         0
     )
 
     print('Back Propagation Done.')
 
     input_grad, weights_grad = vanillaConvBackward(
-        nnz=input_nnz,
+        innz=batchsize * input_nnz,
+        onnz=l,
         c_in=input_channel, 
         c_out=output_channel, 
         in_c=coords, 
+        out_c=out_coords,
         in_f=feats,
         kw=weights, 
         ks=kernel_size,
@@ -331,14 +328,14 @@ if __name__ == '__main__':
     weight_grad_cuda = dev_weight_grad.clone().cpu().numpy()
 
     in_grad_error = CheckResults(
-        len=input_nnz * input_channel,
+        len=batchsize * input_nnz * input_channel,
         c_out=input_channel,
         results1=input_grad_cuda,
         results2=input_grad
     )
 
     weights_grad_error = CheckResultsWeight(
-        k_vol=kernel_size ** 3,
+        k_vol=kernel_volume,
         c_in=input_channel, 
         c_out=output_channel,
         results1=weight_grad_cuda, 
@@ -347,8 +344,7 @@ if __name__ == '__main__':
 
     print('The accumulated abs error of input gradients: %.4f' % in_grad_error)
     print('The accumulated abs error of weights gradients: %.4f' % weights_grad_error)
-
-    '''
+    
     
 
 

@@ -232,6 +232,7 @@ __global__ void exclusive_scan_for_kernel(
 /*
 Make sure the coordinates are decoded by batch-first order.
 */
+template <int _BOUND>
 __global__ void coordsDownsample(
                 // amount of non-zeros in input 
                 const int innz,
@@ -246,20 +247,25 @@ __global__ void coordsDownsample(
 ){
     const int nid = blockIdx.x * blockDim.x + threadIdx.x;
     if (nid >= innz) {return;}
-    uint64_t acc;
+    uint64_t code;
     // manually accumulation
-    acc = icoords[nid * 4] * 1011331019;
-    acc += (icoords[nid * 4 + 1] / stride_x * stride_x) * 1011331;
-    acc += (icoords[nid * 4 + 2] / stride_y * stride_y) * 1009;
-    acc += icoords[nid * 4 + 3] / stride_z * stride_z;
-    ocoords_code[nid] = acc;
+    // code = b
+    code = icoords[nid * 4];
+    // code = b * s + x
+    code = code * _BOUND + (icoords[nid * 4 + 1] / stride_x * stride_x);
+    // code = (b * s + x) * s + y
+    code = code * _BOUND + (icoords[nid * 4 + 2] / stride_y * stride_y);
+    // code = ((b * s + x) * s + y) * s + z
+    code = code * _BOUND + (icoords[nid * 4 + 3] / stride_z * stride_z);
+    ocoords_code[nid] = code;
 }
 
 
 /*
 The weights used for linear coding limit the coordinates to 
-the range of [0, 1000].
+the range of [0, _BOUND).
 */
+template <int _BOUND>
 __global__ void coordsGenerator(
                 // amount of non-zeros in output 
                 const int onnz, 
@@ -272,12 +278,17 @@ __global__ void coordsGenerator(
     if (nid >= onnz) {return;}
     // TODO: coalesced memory access
     uint64_t code = ocoords_code[nid];
-    ocoords[nid * 4] = code / 1011331019;
-    int res = code - ocoords[nid * 4] * 1011331019;
-    ocoords[nid * 4 + 1] = res / 1011331;
-    res -= ocoords[nid * 4 + 1] * 1011331;
-    ocoords[nid * 4 + 2] = res / 1009;
-    res -= ocoords[nid * 4 + 2] * 1009;
-    ocoords[nid * 4 + 3] = res;
+    // code = ((b * s + x) * s + y) * s + z
+    ocoords[nid * 4 + 3] = code % _BOUND;
+    code /= _BOUND;
+    // code = (b * s + x) * s + y
+    ocoords[nid * 4 + 2] = code % _BOUND;
+    code /= _BOUND;
+    // code = b * s + x
+    ocoords[nid * 4 + 1] = code % _BOUND;
+    code /= _BOUND;
+    // code = b
+    ocoords[nid * 4] = code;
 }
+
 

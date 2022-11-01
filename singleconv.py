@@ -4,6 +4,7 @@ import torch
 from torch import nn
 import time
 
+from script.spconv import conv3d
 from script.sptensor import spTensor
 from models.minkunet import SparseResUNet42
 from models.resnet import SparseResNet21D
@@ -17,72 +18,78 @@ from datasets.KITTI import KITTIDataset
 def main() -> None:
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
+    in_channel = 4
+    mid_channel = 64
+    out_channel = 96
+
     cinfo = dict()
-    cinfo["in"] = [256]
-    cinfo["out"] = [256]
-    cinfo["kernel"] = [2, 3] 
+    cinfo["in"] = [in_channel, mid_channel]
+    cinfo["out"] = [mid_channel, out_channel]
+    cinfo["kernel"] = [3] 
 
-    # backbone = SparseResUNet42
-    backbone = SparseResNet21D
-    print(f'{backbone.__name__}:')
-    model: nn.Module = backbone(in_channels=4, width_multiplier=1.0)
-    # print(model)
-    model = model.to(device).eval()
+    warmup_conv = conv3d(in_channels=in_channel,
+                out_channels=mid_channel,
+                kernel_size=3, 
+                tc_mode_16f=0).to(device)
+    warmup_conv.eval()
 
-    dataset = S3DISDataset(
+    single_conv = conv3d(in_channels=mid_channel,
+                out_channels=out_channel,
+                kernel_size=3, 
+                tc_mode_16f=0).to(device)
+    single_conv.eval()
+
+    # dataset = ModelNet40Dataset()
+    dataset = KITTIDataset(
+        path='/home/eva_data/hongke21/datasets/data_object_velodyne/data_object_velodyne/testing/velodyne/',
+        size=99
+    )
+    '''dataset = S3DISDataset(
         data_root='/home/eva_data/hongke21/datasets/stanford_indoor3d',
         test_area=4,
         num_point=4096 * 8,
-        block_size=2.0)
-    '''dataset = KITTIDataset(
-        path='/home/eva_data/hongke21/datasets/data_object_velodyne/data_object_velodyne/testing/velodyne/',
-        size=50
-    )'''
-    # dataset = ModelNet40Dataset()
+        block_size=2.0)'''
     DataLoader = torch.utils.data.DataLoader(
         dataset, 
         batch_size=2, 
         collate_fn=sparse_collate_fn,
         shuffle=False)
     # TODO: get a max input nnz from Dataset
-    sample_num = 4096 * 16
+    sample_num = 4096 * 32
     buffer = build_conv_buffer(cinfo, sample_num, device)
 
     count = 0
     dur = 0
+    all_nnz = 0
     with torch.no_grad():
         for i, batch in enumerate(DataLoader):
-            if i == 7: break
+            if i == 6: break
 
-            input = batch['input']
+            input = batch['input'].to(device)
             input_nnz = input.coords.size(0)
             print("input nnz: %d" % input_nnz)
-            input = input.to(device)
+            input.buffer = buffer
+            output = warmup_conv(input)
 
-            if i <= 5:
-                input.buffer = buffer
-                outputs = model(input)
-
-            if i > 5:
+            if i >= 5:
                 # torch.cuda.synchronize()
                 # start=time.time()
                 torch.cuda.cudart().cudaProfilerStart()
-                input.buffer = buffer
-                outputs = model(input)
+                output = single_conv(output)
                 torch.cuda.cudart().cudaProfilerStop()
                 # torch.cuda.synchronize()
                 # end=time.time()
-                # count += 1
                 # dur += (end - start)
+                # count += 1
+                # all_nnz += input_nnz
     
     # inf_time = dur / count
+    # ave_nnz = all_nnz / count
 
     # print("Batches: %d" % count)
+    # print("Average nnz: %d" % ave_nnz)
     # print("Duration: {:.4f} ms".format(inf_time * 1000))
     
-    # for k, output in enumerate(outputs):
-    #     print(f'output[{k}].F.shape = {output.feats.shape}')
-
 
 if __name__ == '__main__':
     main()
