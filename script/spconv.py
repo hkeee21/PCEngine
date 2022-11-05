@@ -47,14 +47,12 @@ class conv3d(nn.Module):
         
         if self.kernel_volume > 1:
             self.kernel = nn.Parameter(
-                torch.zeros((self.kernel_volume, in_channels, out_channels), \
-                    dtype=torch.float))
+                torch.zeros((self.kernel_volume, in_channels, out_channels)))
         else:
-            self.kernel = nn.Parameter(torch.zeros((in_channels, out_channels), \
-                    dtype=torch.float))
+            self.kernel = nn.Parameter(torch.zeros((in_channels, out_channels)))
         
         if bias:
-            self.bias = nn.Parameter(torch.zeros((out_channels), dtype=torch.float))
+            self.bias = nn.Parameter(torch.zeros((out_channels)))
         else:
             self.bias = None
 
@@ -98,7 +96,7 @@ class conv3d(nn.Module):
 class convF(Function):
     
     @staticmethod
-    @custom_fwd
+    @custom_fwd(cast_inputs=torch.half)
     def forward(ctx,
                 in_feats: torch.Tensor,
                 knnz: torch.Tensor, 
@@ -129,7 +127,7 @@ class convF(Function):
 
         if transposed:
             output_feats = torch.zeros((nnz[0], out_channel), \
-                dtype=torch.float, device=in_feats.device)
+                dtype=in_feats.dtype, device=in_feats.device)
 
             conv_fwd_cuda(
                 in_feats,
@@ -149,7 +147,7 @@ class convF(Function):
             )
         else:
             output_feats = torch.zeros((nnz[1], out_channel), \
-                dtype=torch.float, device=in_feats.device)
+                dtype=in_feats.dtype, device=in_feats.device)
 
             conv_fwd_cuda(
                 in_feats,
@@ -213,6 +211,7 @@ def conv_func(input, in_channel, out_channel, kernel,
     
     input_size = input.coords.size(0)
     kernel_volume = kernel.size(0)
+    data_type = input.feats.dtype
 
     if kernel_size_code == conv_info_encoder([1, 1, 1]) \
         and stride_code == conv_info_encoder([1, 1, 1]):
@@ -296,7 +295,7 @@ def conv_func(input, in_channel, out_channel, kernel,
             if input.buffer.size(0) < sum_nnz * (in_channel + out_channel):
                 print("Newly allocated buffer.")
                 input.buffer = torch.zeros((sum_nnz, (in_channel + out_channel)), \
-                    dtype=torch.float, device=input.feats.device)
+                    dtype=data_type, device=input.feats.device)
 
             kmap = [imap, omap, icsr, ocsr, knnz, kpos, sum_nnz, (input_size, out_nnz)]
             input.kmaps[(kernel_size_code, input.stride, stride_code)] = kmap

@@ -41,7 +41,7 @@ void ConvolutionForward(const at::Tensor in_feats,
                         const at::Tensor out_csr, 
                         at::Tensor buffer, 
                         const bool separate_mid, 
-                        const bool TensorCoreMode
+                        const bool TensorCore16Fast
                         ){
     
     // printf("[SubmanifoldSparseConv] - Starts.\n");
@@ -55,14 +55,12 @@ void ConvolutionForward(const at::Tensor in_feats,
     int out_channel = kernel.size(2);
     int k_vol = kernel.size(0);
 
-    float *in_feats_ptr = in_feats.data_ptr<float>();
-    float *weight_ptr = kernel.data_ptr<float>();
-    float *out_feats_ptr = out_feats.data_ptr<float>();
+    bool data_type_half = in_feats.scalar_type() == at::ScalarType::Half;
+   
     int *in_map_ptr = in_map.data_ptr<int>();
     int *out_map_ptr = out_map.data_ptr<int>();
     int *in_csr_ptr = in_csr.data_ptr<int>();
     int *out_csr_ptr = out_csr.data_ptr<int>();
-
     int *kpos_ptr = kernel_pos.data_ptr<int>();
 
     // int sum_nnz = in_buffer.size(0);
@@ -75,27 +73,45 @@ void ConvolutionForward(const at::Tensor in_feats,
     int mid_weight_id = (ksx - 1) / 2 * ksy * ksz + 
         (ksy - 1) / 2 * ksz + (ksz - 1) / 2;
 
-    float *buf_ptr = buffer.data_ptr<float>();
-
     // cublas
     const float alpha = 1.0;
     const float beta = 0.0;
+    at::Tensor alpha_half = torch::ones({1}, dtype(at::ScalarType::Half));
+    at::Tensor beta_half = torch::zeros({1}, dtype(at::ScalarType::Half));
 
     cublasHandle_t cublasH = at::cuda::getCurrentCUDABlasHandle();
 
-    /********************************************************************/
-    // default stream
+    CUBLAS_CHECK(cublasSetMathMode(cublasH, CUBLAS_TENSOR_OP_MATH));
 
-    gather_all_input_major_csr<<<DIV_UP(in_nnz, 4), 
-        dim3(DIV_UP(in_channel, 4), 2, 4), 0, 0>>>(
-            in_nnz,
-            in_channel,
-            in_feats_ptr,
-            kpos_ptr, 
-            in_csr_ptr, 
-            in_map_ptr,
-            buf_ptr
-    );
+    cublasComputeType_t ComputeType;
+    cudaDataType_t DataType;
+    if (data_type_half){
+        ComputeType = CUBLAS_COMPUTE_16F;
+        DataType = CUDA_R_16F;
+    }
+    else{
+        ComputeType = TensorCore16Fast ? 
+            CUBLAS_COMPUTE_32F_FAST_16F : CUBLAS_COMPUTE_32F_FAST_TF32;
+        DataType = CUDA_R_32F;
+    }
+
+    /********************************************************************/
+    // default stream: gather
+
+    if (data_type_half){
+        gather_all_input_major_csr_half<<<DIV_UP(in_nnz, 4), 
+            dim3(DIV_UP(in_channel, 8), 2, 4), 0, 0>>>(
+                in_nnz, in_channel, reinterpret_cast<half *>(in_feats.data_ptr<at::Half>()), 
+                kpos_ptr, in_csr_ptr, in_map_ptr, reinterpret_cast<half *>(buffer.data_ptr<at::Half>())
+        );
+    }
+    else{
+        gather_all_input_major_csr_float<<<DIV_UP(in_nnz, 4), 
+            dim3(DIV_UP(in_channel, 4), 2, 4), 0, 0>>>(
+                in_nnz, in_channel, in_feats.data_ptr<float>(), kpos_ptr, 
+                in_csr_ptr, in_map_ptr, buffer.data_ptr<float>()
+        );
+    }
 
     /********************************************************************/
     // create the streams
@@ -107,63 +123,6 @@ void ConvolutionForward(const at::Tensor in_feats,
     for (int i = 0; i < n_stream; i++) {
         cudaStreamCreateWithFlags(&pl_stream[i], cudaStreamDefault);
     }
-
-    // gather features
-    // size_t const BLOCK_NUM = DIV_UP(nnz, 4);
-
-    /*gather_all_input_major_template2<4, 2, 32>
-                <<<BLOCK_NUM, dim3(32, 2, 4), 
-                (4 * (k_vol - 1) + 1) * sizeof(int)>>>(
-                nnz, k_vol, sum_nnz, kernel_pos_ptr, in_channel,
-                in_feats_ptr, in_map_ptr, gfeats_ptr);*/
-
-    /*switch(k_size){
-        case 5:
-            gather_all_input_major_template2<4, 2, 32, 4 * 124 + 1>
-                <<<BLOCK_NUM, dim3(32, 2, 4)>>>(
-                nnz, k_vol, sum_nnz, kernel_pos_ptr, in_channel,
-                in_feats_ptr, in_map_ptr, gfeats_ptr);
-            break;
-        case 3:
-            gather_all_input_major_template2<4, 2, 32, 4 * 26 + 1>
-                <<<BLOCK_NUM, dim3(32, 2, 4)>>>(
-                nnz, k_vol, sum_nnz, kernel_pos_ptr, in_channel,
-                in_feats_ptr, in_map_ptr, gfeats_ptr);
-            break;
-        case 2:
-            gather_all_input_major_template2<4, 2, 32, 4 * 7 + 1>
-                <<<BLOCK_NUM, dim3(32, 2, 4)>>>(
-                nnz, k_vol, sum_nnz, kernel_pos_ptr, in_channel,
-                in_feats_ptr, in_map_ptr, gfeats_ptr);
-            break;
-    }*/
-
-    // size_t const block_g = in_channel > PAR_THREAD ? in_channel : PAR_THREAD;
-    // size_t const grid_g = ((nnz) * (in_channel) + block_g - 1) / block_g;
-
-    /*gather_all_input_major_template<4, 2, 32>
-        <<<DIV_UP(nnz, 4), dim3(32, 2, 4)>>>(
-            nnz,
-            k_vol, 
-            sum_nnz,
-            kernel_pos_ptr, 
-            in_channel,
-            in_feats_ptr,
-            in_map_ptr,
-            gfeats_ptr
-    );*/
-
-    /*gather_all_input_major_csr_balance<64, 8, 16>
-        <<<DIV_UP(sum_nnz, 64), dim3(8, 16)>>>(
-            nnz,
-            k_vol, 
-            sum_nnz,
-            in_channel,
-            in_feats_ptr,
-            in_csr_ptr,  
-            in_map_ptr,
-            gfeats_ptr
-    );*/
 
     /********************************************************************/
     // loop over all kernel offsets
@@ -182,26 +141,61 @@ void ConvolutionForward(const at::Tensor in_feats,
 
         CUBLAS_CHECK(cublasSetStream(cublasH, pl_stream[stream_id]));
 
-        // cublas GEMM for matmul
-        if (TensorCoreMode){
+        if (data_type_half){
+            // cublas GEMM for matmul
+            CUBLAS_CHECK(cublasGemmEx(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
+                    out_channel, cur_nnz, in_channel, 
+                    (reinterpret_cast<half *>(alpha_half.data_ptr<at::Half>())),
+                    // &weight_ptr[i * in_channel * out_channel], 
+                    (reinterpret_cast<half *>(kernel.data_ptr<at::Half>()
+                        + i * in_channel * out_channel)),
+                    DataType, out_channel, 
+                    // &buf_ptr[cur_idx * in_channel], 
+                    (reinterpret_cast<half *>(buffer.data_ptr<at::Half>()
+                        + cur_idx * in_channel)),
+                    DataType, in_channel, 
+                    (reinterpret_cast<half *>(beta_half.data_ptr<at::Half>())),  
+                    // &buf_ptr[buffer_offset + cur_idx * out_channel], 
+                    (reinterpret_cast<half *>(buffer.data_ptr<at::Half>()
+                        + buffer_offset + cur_idx * out_channel)), 
+                    DataType, out_channel,
+                    ComputeType,
+                    CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+            
+            /*CUBLAS_CHECK(cublasHgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
+                    out_channel, cur_nnz, in_channel, 
+                    (reinterpret_cast<half *>(alpha_half.data_ptr<at::Half>())), 
+                    // &weight_ptr[i * in_channel * out_channel], 
+                    (reinterpret_cast<half *>(kernel.data_ptr<at::Half>()
+                        + i * in_channel * out_channel)),
+                    out_channel, 
+                    // &buf_ptr[cur_idx * in_channel], 
+                    (reinterpret_cast<half *>(buffer.data_ptr<at::Half>()
+                        + cur_idx * in_channel)),
+                    in_channel, 
+                    (reinterpret_cast<half *>(beta_half.data_ptr<at::Half>())), 
+                    // &buf_ptr[buffer_offset + cur_idx * out_channel], 
+                    (reinterpret_cast<half *>(buffer.data_ptr<at::Half>()
+                        + buffer_offset + cur_idx * out_channel)), 
+                    out_channel));*/
+        }
+        else{
+            // cublas GEMM for matmul
             CUBLAS_CHECK(cublasGemmEx(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
                     out_channel, cur_nnz, in_channel, 
                     &alpha, 
-                    &weight_ptr[i * in_channel * out_channel], CUDA_R_32F, out_channel, 
-                    &buf_ptr[cur_idx * in_channel], CUDA_R_32F, in_channel, 
+                    // &weight_ptr[i * in_channel * out_channel], 
+                    (kernel.data_ptr<float>() + i * in_channel * out_channel),
+                    DataType, out_channel, 
+                    // &buf_ptr[cur_idx * in_channel], 
+                    (buffer.data_ptr<float>() + cur_idx * in_channel),
+                    DataType, in_channel, 
                     &beta, 
-                    &buf_ptr[buffer_offset + cur_idx * out_channel], CUDA_R_32F, out_channel,
-                    CUBLAS_COMPUTE_32F_FAST_16F,
+                    // &buf_ptr[buffer_offset + cur_idx * out_channel], 
+                    (buffer.data_ptr<float>() + buffer_offset + cur_idx * out_channel), 
+                    DataType, out_channel,
+                    ComputeType,
                     CUBLAS_GEMM_DEFAULT_TENSOR_OP));
-        }
-        else{
-            CUBLAS_CHECK(cublasSgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
-                    out_channel, cur_nnz, in_channel, 
-                    &alpha, 
-                    &weight_ptr[i * in_channel * out_channel], out_channel, 
-                    &buf_ptr[cur_idx * in_channel], in_channel, 
-                    &beta, 
-                    &buf_ptr[buffer_offset + cur_idx * out_channel], out_channel));
         }
 
         cur_idx += cur_nnz;
@@ -243,44 +237,70 @@ void ConvolutionForward(const at::Tensor in_feats,
 
     /********************************************************************/
     // default stream
-
-    scatter_all_output_major_csr<<<DIV_UP(out_nnz, 4), 
-        dim3(DIV_UP(out_channel, 4), 4), 0, 0>>>(
-            out_nnz, out_channel, &buf_ptr[buffer_offset], kpos_ptr, 
-            out_csr_ptr, out_map_ptr, out_feats_ptr);
-
-
-    CUBLAS_CHECK(cublasSetStream(cublasH, 0));
-
-    if (separate_mid){
-    // computation for w[0, 0, 0]
-    // in_nnz == out_nnz
-    if (TensorCoreMode){
-
-        CUBLAS_CHECK(cublasSetMathMode(cublasH, CUBLAS_TENSOR_OP_MATH));
-        
-        CUBLAS_CHECK(cublasGemmEx(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
-                    out_channel, in_nnz, in_channel, 
-                    &alpha, 
-                    &weight_ptr[mid_weight_id * in_channel * out_channel], CUDA_R_32F, out_channel, 
-                    in_feats_ptr, CUDA_R_32F, in_channel, 
-                    &alpha, 
-                    out_feats_ptr, CUDA_R_32F, out_channel,
-                    CUBLAS_COMPUTE_32F_FAST_16F,
-                    CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    
+    if (data_type_half){
+        scatter_all_output_major_csr_half<<<DIV_UP(out_nnz, 4), 
+            dim3(DIV_UP(out_channel, 8), 4), 0, 0>>>(
+                out_nnz, out_channel, (reinterpret_cast<half *>(buffer.data_ptr<at::Half>() + buffer_offset)), 
+                kpos_ptr, out_csr_ptr, out_map_ptr, reinterpret_cast<half *>(out_feats.data_ptr<at::Half>()));
     }
     else{
-        CUBLAS_CHECK(cublasSgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
+        scatter_all_output_major_csr_float<<<DIV_UP(out_nnz, 4), 
+            dim3(DIV_UP(out_channel, 4), 4), 0, 0>>>(
+                out_nnz, out_channel, (buffer.data_ptr<float>() + buffer_offset), kpos_ptr, 
+                out_csr_ptr, out_map_ptr, out_feats.data_ptr<float>());
+    }
+
+
+    // computation for w[0, 0, 0]
+    // in_nnz == out_nnz
+    if (separate_mid){
+        CUBLAS_CHECK(cublasSetStream(cublasH, 0));
+
+        if (data_type_half){
+            CUBLAS_CHECK(cublasGemmEx(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
+                    out_channel, in_nnz, in_channel, 
+                    reinterpret_cast<half *>(alpha_half.data_ptr<at::Half>()), 
+                    // &weight_ptr[mid_weight_id * in_channel * out_channel], 
+                    reinterpret_cast<half *>(kernel.data_ptr<at::Half>() 
+                        + mid_weight_id * in_channel * out_channel),
+                    DataType, out_channel, 
+                    reinterpret_cast<half *>(in_feats.data_ptr<at::Half>()), 
+                    DataType, in_channel, 
+                    reinterpret_cast<half *>(alpha_half.data_ptr<at::Half>()), 
+                    reinterpret_cast<half *>(out_feats.data_ptr<at::Half>()), 
+                    DataType, out_channel,
+                    ComputeType,
+                    CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+            
+            /*CUBLAS_CHECK(cublasHgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
+                    out_channel, in_nnz, in_channel, 
+                    reinterpret_cast<half *>(alpha_half.data_ptr<at::Half>()), 
+                    // &weight_ptr[mid_weight_id * in_channel * out_channel], 
+                    reinterpret_cast<half *>(kernel.data_ptr<at::Half>() 
+                        + mid_weight_id * in_channel * out_channel),
+                    out_channel, 
+                    reinterpret_cast<half *>(in_feats.data_ptr<at::Half>()), 
+                    in_channel, 
+                    reinterpret_cast<half *>(alpha_half.data_ptr<at::Half>()), 
+                    reinterpret_cast<half *>(out_feats.data_ptr<at::Half>()), 
+                    out_channel));*/
+        }
+        else{
+            CUBLAS_CHECK(cublasGemmEx(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, 
                     out_channel, in_nnz, in_channel, 
                     &alpha, 
-                    &weight_ptr[mid_weight_id * in_channel * out_channel], 
-                    out_channel, 
-                    in_feats_ptr, 
-                    in_channel, 
+                    // &weight_ptr[mid_weight_id * in_channel * out_channel], 
+                    (kernel.data_ptr<float>() + mid_weight_id * in_channel * out_channel),
+                    DataType, out_channel, 
+                    in_feats.data_ptr<float>(), 
+                    DataType, in_channel, 
                     &alpha, 
-                    out_feats_ptr, 
-                    out_channel));
-    }
+                    out_feats.data_ptr<float>(), 
+                    DataType, out_channel,
+                    ComputeType,
+                    CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+        }
     }
 
 }
@@ -347,7 +367,7 @@ void ConvolutionBackward(const at::Tensor out_feats_grad,
     CUBLAS_CHECK(cublasSetStream(cublasH, stream));
 
     // gather for ofeats_grad
-    gather_all_input_major_csr<<<DIV_UP(onnz, 4), 
+    gather_all_input_major_csr_float<<<DIV_UP(onnz, 4), 
         dim3(DIV_UP(out_channel, 4), 2, 4), 0, 0>>>(
             onnz, // in_nnz,
             out_channel, // in_channel,
@@ -409,7 +429,7 @@ void ConvolutionBackward(const at::Tensor out_feats_grad,
 
     // scatter for ifeats_grad
 
-    scatter_all_output_major_csr<<<DIV_UP(innz, 4), 
+    scatter_all_output_major_csr_float<<<DIV_UP(innz, 4), 
         dim3(DIV_UP(in_channel, 4), 4), 0, 0>>>(
             innz, // out_nnz, 
             in_channel, // out_channel, 
@@ -435,7 +455,7 @@ void ConvolutionBackward(const at::Tensor out_feats_grad,
     );*/
 
     // gather for in_feats
-    gather_all_input_major_csr<<<DIV_UP(innz, 4), 
+    gather_all_input_major_csr_float<<<DIV_UP(innz, 4), 
         dim3(DIV_UP(in_channel, 4), 2, 4), 0, 0>>>(
             innz,
             in_channel,

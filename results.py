@@ -58,6 +58,7 @@ if __name__ == '__main__':
     dev_feats = torch.tensor(feats, dtype=torch.float).to(device)
 
     '''
+    data_type = torch.half
     batchsize = 2
     # real data test
     input_channel, kernel_size = 16, [3, 2, 3]
@@ -72,7 +73,7 @@ if __name__ == '__main__':
     print('input nnz: %d' % input_nnz)
     feats = np.random.uniform(0, 1, size=(input_nnz, input_channel))
     coords = torch.as_tensor(coords, dtype=torch.int)
-    feats = torch.as_tensor(feats, dtype=torch.float)
+    feats = torch.as_tensor(feats, dtype=data_type)
 
     # we use batch index as the first dimension of coordinates
     bcoords, bfeats = [], []
@@ -91,8 +92,8 @@ if __name__ == '__main__':
     # To generate the weights
     output_channel = 16
     weights = np.random.uniform(0, 1, size=(kernel_volume, input_channel, output_channel))
-    dev_weights = torch.tensor(weights, dtype=torch.float).to(device)
-
+    dev_weights = torch.tensor(weights, dtype=data_type).to(device)
+    
     # map and output, for mem allocation observation
     dev_imap = - torch.ones((batchsize * input_nnz * kernel_volume), dtype=torch.int).to(device)
     dev_omap = - torch.ones((batchsize * input_nnz * kernel_volume), dtype=torch.int).to(device)
@@ -101,7 +102,7 @@ if __name__ == '__main__':
     dev_icsr = torch.zeros((batchsize * input_nnz + 2), dtype=torch.int).to(device)
     dev_ocsr = torch.zeros((batchsize * input_nnz + 2), dtype=torch.int).to(device)
 
-    layer_stride = [1, 2, 1]
+    layer_stride = [1, 1, 1]
     layer_stride_code = 311 * layer_stride[0] + 17 * layer_stride[1] + layer_stride[2]
     # make sure the input coordinates are at least tensor stride away from each other
     # TODO: can be further fused into the random data generator
@@ -138,7 +139,7 @@ if __name__ == '__main__':
     print("sum nnz : %d" % sum_nnz)
     
     l = dev_out_coords.size(0)
-    dev_output = torch.zeros((l, output_channel), dtype=torch.float).to(device)
+    dev_output = torch.zeros((l, output_channel), dtype=data_type).to(device)
 
     print("output nnz : %d" % l)
     
@@ -214,7 +215,8 @@ if __name__ == '__main__':
     
     '''
 
-    dev_buf = torch.zeros((input_nnz * batchsize * 10 * (input_channel + output_channel), ), dtype=torch.float).to(device)
+    dev_buf = torch.zeros((input_nnz * batchsize * 10 * (input_channel + output_channel), ), \
+        dtype=data_type).to(device)
     
     tensorcore_16F = 0
 
@@ -264,6 +266,9 @@ if __name__ == '__main__':
 
     print('The accumulated abs error: %.4f' % accu_error)
     
+
+    print(dev_buf)
+
     '''
     
     # mapping check
@@ -282,7 +287,7 @@ if __name__ == '__main__':
         
         print("----------")
     
-    '''
+    
     # backward validation
 
     output_grad = np.random.uniform(0, 1, size=(l, output_channel))
@@ -345,7 +350,7 @@ if __name__ == '__main__':
     print('The accumulated abs error of input gradients: %.4f' % in_grad_error)
     print('The accumulated abs error of weights gradients: %.4f' % weights_grad_error)
     
-    
+    '''
 
 
 
