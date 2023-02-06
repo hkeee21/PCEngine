@@ -9,7 +9,7 @@ PCEngine(v2.0.0) contains both `Gather-MM-Scatter` and `Fetch-on-Demand` dataflo
 1. Feature amount for each weight position is a multiple of _M_ for tiling purpose. _M_ can be adjusted by changing the **third input** of kernel `exclusive_scan_for_kernel_quantified` in `backend/hash.cu`. Current _M_ is set to 128.
 2. The specific design for channel size % 8 != 0 (e.g. channel size = 4, 6) lies in kernel `naive_gemm_{fp16, fp32}_2`, which is supposed to be replaced in the new GEMM kernel. 
 3. The buffer should be reset if no padding is used in the new GEMM kernel.
-4. No change in gather or scatter kernel is needed for channel size % == 2 cases.
+4. No further change in gather or scatter kernel is needed for channel size % == 2 cases.
 
 ## Install
 `python3 setup.py install`
