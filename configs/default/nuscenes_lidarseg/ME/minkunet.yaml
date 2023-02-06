@@ -1,0 +1,4 @@
+model:
+  name: minkunet
+  in_channels: 6
+  cr: 1.0

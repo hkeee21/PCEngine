@@ -21,6 +21,24 @@ at::Tensor HashMap(
                 at::Tensor icsr,
                 at::Tensor ocsr,
                 at::Tensor kernel_nnz,
-                at::Tensor kernel_pos,
+                at::Tensor kernel_kpos,
+                at::Tensor kernel_qkpos, 
+                const bool separate_mid
+                );
+
+
+at::Tensor HashMap_simple(
+                const at::Tensor in_coords, 
+                const int batch_size, 
+                const int k_size_code, 
+                const int k_vol, 
+                const int c_in, 
+                const int c_out, 
+                const int l_stride_code, 
+                const int t_stride_code, 
+                at::Tensor map,
+                at::Tensor kernel_nnz,
+                at::Tensor kernel_kpos,
+                at::Tensor kernel_qkpos, 
                 const bool separate_mid
                 );

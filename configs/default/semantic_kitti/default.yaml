@@ -1,0 +1,25 @@
+dataset:
+  name: semantic-kitti
+  root: /home/nfs_data/yangshang19/smr/torchsparse-data/benchmarks/semantic-kitti
+  max_saver: 'mIoU'
+  version: 'v1.0-trainval'
+  max_sweeps: 1
+  max_points: 80000
+  num_classes: 19
+
+model:
+  name: minkunet
+  in_channels: 4
+  cr: 1.0
+  # tag: ['whole', 'whole', 'whole', 
+  #       'whole', 'whole', 
+  #       'whole', 'whole', 
+  #       'whole', 'whole', 'end']
+  # tag: ['simple', 'simple', 'simple', 
+  #       'simple', 'simple', 
+  #       'simple', 'simple', 
+  #       'simple', 'simple', 'end']
+  # tag: ['whole', 'whole', 'whole', 
+  #       'whole', 'whole', 
+  #       'whole', 'whole', 
+  #       'whole', 'whole', 'end']

@@ -6,66 +6,32 @@ from itertools import repeat
 import time
 from torch.utils.cpp_extension import load
 from script.utils import CheckResultsWeight, binary_search, sparse_quantize, \
-    load_file, vanillaConv, CheckResults, vanillaConvBackward
+    load_file, vanillaConv, CheckResults, vanillaConvBackward, build_conv_buffer, sparse_collate_fn
 # from hashcublas.backend import mapping_cuda, conv_fwd_cuda
-
-
-hash_module = load(name="mapping_cuda",
-                   sources=["backend/pybind_hash.cpp", 
-                   "backend/hash.cu"],
-                   verbose=True)
-
-
-conv_module = load(name="conv_fwd_cuda",
-                   sources=["backend/pybind_conv.cpp", 
-                   "backend/spconv.cu"],
-                   verbose=True)
-
-
-conv_back_module = load(name="conv_bwd_cuda",
-                    sources=["backend/pybind_conv_back.cpp",
-                    "backend/spconv.cu"],
-                    verbose=True)
-
+from PCEngine.backend import mapping_cuda, conv_fwd_cuda, mapping_simple_cuda, conv_fwd_simple_cuda
+from configs.config import Config
+from dataset_build import make_dataset
+from model_build import make_model
+import argparse
 
 if __name__ == '__main__': 
     device = torch.device('cuda')
     
-    '''
-    # To generate the inputs (COO + feats)
-    # Here input size denotes the number of input nnz. 
-    # Currently only odd kernel size is considered
-    input_size, input_channel, kernel_size = 1000, 3, 3
-    voxel_size = 0.1
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dataflow', type=str, default='D1')
+    args = parser.parse_args()
 
-    
-    # Currently only 3D inputs are considered
-    coords = np.random.uniform(0, 10, size=(input_size, 3))
-
-    # voxelization
-    coords, indices = sparse_quantize(coords, voxel_size, return_index=True)
-    input_nnz = coords.shape[0]
-
-    feats = np.random.uniform(0, 1, size=(input_nnz, input_channel)) 
-
-    # Sort for random data
-    # Real data is sorted already
-    arrSortedIndex = np.lexsort((coords[:, 2], coords[:, 1], coords[:, 0]))
-    coords = coords[arrSortedIndex]
-    feats = feats[arrSortedIndex]
-
-    dev_coords = torch.tensor(coords, dtype=torch.int).to(device)
-    dev_feats = torch.tensor(feats, dtype=torch.float).to(device)
-
-    '''
-    data_type = torch.half
-    batchsize = 2
+    save_name = 'v04-b1-k333-s121-i16-o16-FP32'
+    data_type = torch.float
+    batchsize = 1
     # real data test
-    input_channel, kernel_size = 16, [3, 2, 3]
+    input_channel, kernel_size = 16, [3, 3, 3]
+    output_channel = 16
+    layer_stride = [1, 1, 1]
     kernel_size_code = 311 * kernel_size[0] + 17 * kernel_size[1] + kernel_size[2] 
     kernel_volume = np.prod(kernel_size, dtype=int)
 
-    coord, _, pcd = load_file("/home/hongke21/nfs/MinkowskiEngine/MinkowskiEngine/examples/1.ply")
+    coord, _, pcd = load_file("data/1.ply")
     coord -= np.min(coord, axis=0, keepdims=True)
     voxel_size = 0.4
     coords, indices = sparse_quantize(coord, voxel_size, return_index=True)
@@ -88,21 +54,62 @@ if __name__ == '__main__':
 
     dev_coords = coords.to(device)
     dev_feats = feats.to(device)
+    '''
+
+    kernel_size, input_channel, output_channel, batchsize = [3, 3, 3], 6, 64, 1
+    kernel_size_code = 311 * kernel_size[0] + 17 * kernel_size[1] + kernel_size[2] 
+    kernel_volume = np.prod(kernel_size, dtype=int)
+
+    torch.backends.cudnn.benchmark = False
+
+    config_file = f"configs/default/nuscenes_lidarseg/default.yaml"
+
+    configs = Config()
+    configs.reload(config_file, recursive=True)
+    configs.model.cr = 1.0
+    configs.model.enable_fp16 = True
+    configs.dataset.max_sweeps = 1
+
+    dataset = make_dataset(configs, 100)
+
+    dataflow = torch.utils.data.DataLoader(
+                    dataset,
+                    batch_size=1,
+                    # num_workers=configs.workers_per_gpu,
+                    pin_memory=False,
+                    collate_fn=sparse_collate_fn,
+                    shuffle=False
+                )
+
+    enable_fp16 = configs.model.enable_fp16
+
+    data_type = torch.float
+    if enable_fp16:
+        data_type = torch.half
+
+    for i, feed_dict in enumerate(dataflow):
+        inputs = feed_dict["pts_input"].to(device)
+        break
+
+    input_nnz = inputs.coords.shape[0]
+    if enable_fp16:
+        inputs.feats = inputs.feats.half()
     
+    '''
+
     # To generate the weights
-    output_channel = 16
     weights = np.random.uniform(0, 1, size=(kernel_volume, input_channel, output_channel))
     dev_weights = torch.tensor(weights, dtype=data_type).to(device)
     
     # map and output, for mem allocation observation
     dev_imap = - torch.ones((batchsize * input_nnz * kernel_volume), dtype=torch.int).to(device)
-    dev_omap = - torch.ones((batchsize * input_nnz * kernel_volume), dtype=torch.int).to(device)
+    dev_omap = - torch.ones(((batchsize * input_nnz * kernel_volume) * 2), dtype=torch.int).to(device)
     dev_knnz = torch.zeros((kernel_volume), dtype=torch.int).to(device)
-    dev_kpos = torch.zeros((kernel_volume), dtype=torch.int).to(device)
+    dev_kpos = torch.zeros((kernel_volume + 1), dtype=torch.int).to(device)
+    dev_qkpos = torch.zeros((kernel_volume + 1), dtype=torch.int).to(device)
     dev_icsr = torch.zeros((batchsize * input_nnz + 2), dtype=torch.int).to(device)
-    dev_ocsr = torch.zeros((batchsize * input_nnz + 2), dtype=torch.int).to(device)
+    dev_ocsr = torch.zeros(((batchsize * input_nnz + 2) * 2), dtype=torch.int).to(device)
 
-    layer_stride = [1, 1, 1]
     layer_stride_code = 311 * layer_stride[0] + 17 * layer_stride[1] + layer_stride[2]
     # make sure the input coordinates are at least tensor stride away from each other
     # TODO: can be further fused into the random data generator
@@ -113,181 +120,163 @@ if __name__ == '__main__':
 
     print(separate_mid)
 
-    
-    # forward validation
+    if args.dataflow == 'D2':
 
-    dev_out_coords = hash_module.mapping_cuda(
-        dev_coords,
-        kernel_size_code,
-        kernel_volume, 
-        input_channel, 
-        output_channel, 
-        layer_stride_code,
-        tensor_stride_code, 
-        dev_imap,
-        dev_omap,
-        dev_icsr, 
-        dev_ocsr,   
-        dev_knnz,
-        dev_kpos, 
-        separate_mid
-    )
-
-    knnz = dev_knnz.cpu()
-    sum_nnz = knnz.sum().int()
-
-    print("sum nnz : %d" % sum_nnz)
-    
-    l = dev_out_coords.size(0)
-    dev_output = torch.zeros((l, output_channel), dtype=data_type).to(device)
-
-    print("output nnz : %d" % l)
-    
-    out_coords = dev_out_coords.clone().cpu().numpy()
-
-    '''
-    for i in range(l):
-        print("(%d, %d, %d)" % (out_coords[i, 0], out_coords[i, 1], out_coords[i, 2]))
-
-    print("------------------------")
-
-    print(dev_knnz)
-    print(dev_kpos)
-    
-    
-
-    in_map = dev_imap.clone().detach().cpu().numpy()
-    out_map = dev_omap.clone().detach().cpu().numpy()
-
-    print("input map")
-    for i in range(input_nnz):
-        k = dev_icsr[i]
-        while(k < dev_icsr[i + 1]):
-            # if (in_map[i, k] == -1):
-            #     break
-            print("%d - %d" % (in_map[k] / 1186111, in_map[k] % 1186111))
-            k += 1
-        
-        print("----------")
-
-    print("--------------------------------------------")
-
-    print("output map")
-    for i in range(l):
-        k = dev_ocsr[i]
-        while(k < dev_ocsr[i + 1]):
-            # if (in_map[i, k] == -1):
-            #     break
-            print("%d - %d" % (out_map[k] / 1186111, out_map[k] % 1186111))
-            k += 1
-        
-        print("----------")
-
-    print("--------------------------------------------")
-    print("%d - %d" % (dev_icsr[input_nnz], dev_ocsr[l]))
-
-    
-    
-    # some testings on the workload balance idea
-    icsr = dev_icsr.clone().cpu().numpy()
-
-    
-    print("input map")
-    for i in range(input_nnz):
-        print("%d" % (icsr[i + 1] - icsr[i]))
-
-    _MPNS_PER_BLOCK = 48
-    block_num = ceil(sum_nnz / _MPNS_PER_BLOCK) 
-    for b in range(block_num):
-        m_start = b * _MPNS_PER_BLOCK
-        m_end = m_start + _MPNS_PER_BLOCK
-        if (m_end > sum_nnz):
-            m_end = sum_nnz
-        id_start = binary_search(icsr, m_start, 0, input_nnz - 1)
-        id_end = id_start + 1
-        while(icsr[id_end] < m_end):
-            id_end += 1
-        if (m_end - icsr[id_end - 1] <= icsr[id_end] - m_end):
-            id_end -= 1
-        # id_end = binary_search(icsr, m_end, 0, input_nnz - 1)
-        print("%d-%d %d-%d (%d)" % (id_start, id_end, icsr[id_start], icsr[id_end] - 1, icsr[id_end] - icsr[id_start]))
-        # print("%d" % (icsr[id_end] - icsr[id_start]))
-    
-    '''
-
-    dev_buf = torch.zeros((input_nnz * batchsize * 10 * (input_channel + output_channel), ), \
-        dtype=data_type).to(device)
-    
-    tensorcore_16F = 0
-
-    with torch.no_grad(): 
-        conv_module.conv_fwd_cuda(
-            dev_feats,
-            dev_weights,
-            kernel_size_code, 
-            sum_nnz, 
-            dev_output,
-            knnz,
+        dev_out_coords = mapping_simple_cuda(
+            dev_coords, 
+            batchsize, 
+            kernel_size_code,
+            kernel_volume,
+            input_channel, 
+            output_channel, 
+            layer_stride_code,
+            tensor_stride_code,
+            dev_imap, 
+            dev_knnz,
             dev_kpos, 
+            dev_qkpos,
+            separate_mid
+        )
+
+        qsum_nnz = dev_qkpos[-1].cpu().int()
+
+        print("qsum nnz : %d" % qsum_nnz)
+
+        nonzero_idx = torch.nonzero(dev_imap != -1)
+        dev_omap = dev_imap[nonzero_idx]
+        dev_imap = (nonzero_idx % (input_nnz * batchsize)).int()
+
+        l = dev_out_coords.size(0)
+        dev_output = torch.zeros((l, output_channel), dtype=data_type).to(device)
+
+        print("output nnz : %d" % l)
+
+        print("----- activated feature amount for each weight position -----")
+        print(dev_knnz)
+        print("----- accumulated feature address for each weight position -----")
+        print(dev_kpos)
+        print("----- quantified accumulated feature address for each weight position -----")
+        print(dev_qkpos)
+
+        with torch.no_grad(): 
+            conv_fwd_simple_cuda(
+                dev_feats,
+                dev_weights,
+                kernel_size_code, 
+                qsum_nnz, 
+                dev_output,
+                dev_kpos, 
+                dev_qkpos, 
+                dev_imap,
+                dev_omap,
+                separate_mid, 
+                0
+            )
+        
+        print('Sparse Conv Done.')
+    
+
+    elif args.dataflow == 'D1':
+
+        # forward validation
+
+        dev_out_coords = mapping_cuda(
+            dev_coords,
+            kernel_size_code,
+            kernel_volume, 
+            input_channel, 
+            output_channel, 
+            layer_stride_code,
+            tensor_stride_code, 
             dev_imap,
             dev_omap,
             dev_icsr, 
-            dev_ocsr, 
-            dev_buf, 
-            separate_mid, 
-            tensorcore_16F
+            dev_ocsr,   
+            dev_knnz,
+            dev_kpos, 
+            dev_qkpos,
+            separate_mid
         )
-    
-    print('Sparse Conv Done.')
 
-    # torch.cuda.cudart().cudaProfilerStop()
+        # knnz = dev_knnz.cpu()
+        qsum_nnz = dev_qkpos[-1].cpu().int()
+
+        print("qsum nnz : %d" % qsum_nnz)
+
+        print("----- activated feature amount for each weight position -----")
+        print(dev_knnz)
+        print("----- accumulated feature address for each weight position -----")
+        print(dev_kpos)
+        print("----- quantified accumulated feature address for each weight position -----")
+        print(dev_qkpos)
+        
+        l = dev_out_coords.size(0)
+        dev_output = torch.zeros((l, output_channel), dtype=data_type).to(device)
+
+        print("output nnz : %d" % l)
+        
+        out_coords = dev_out_coords.clone().cpu().numpy()
+
+        # dev_buf = torch.zeros((input_nnz * batchsize * 10 * (input_channel + output_channel), ), \
+        #     dtype=data_type).to(device)
+
+        cinfo = dict()
+        cinfo["in"] = [input_channel]
+        cinfo["out"] = [output_channel]
+        cinfo["kernel"] = [2, 3] 
+        dev_buf = build_conv_buffer(cinfo, 2 * input_nnz * batchsize, data_type, device)
+        
+        tensorcore_16F = 0
+
+        # with torch.cuda.amp.autocast(enabled=enable_fp16):
+        with torch.no_grad(): 
+            conv_fwd_cuda(
+                    dev_feats,
+                    dev_weights,
+                    kernel_size_code, 
+                    qsum_nnz, 
+                    dev_output,
+                    dev_kpos, 
+                    dev_qkpos,
+                    dev_imap,
+                    dev_omap,
+                    dev_icsr, 
+                    dev_ocsr, 
+                    dev_buf, 
+                    separate_mid, 
+                    tensorcore_16F
+                )
+        
+        print('Sparse Conv Done.')
+
+    else:
+        raise NotImplementedError
     
     vani_output = vanillaConv(
-        c_in=input_channel,
-        c_out=output_channel,
-        stride=layer_stride, 
-        in_c=coords,
-        in_f=feats,
-        kv=weights,
-        ks=kernel_size
+            c_in=input_channel,
+            c_out=output_channel,
+            stride=layer_stride, 
+            in_c=coords,
+            in_f=feats,
+            kv=weights,
+            ks=kernel_size
     )
 
     print('Vanilla Conv Done.')
-
-    
+        
     # results checking
     output_array = dev_output.clone().cpu().numpy()
     accu_error = CheckResults(
-        len=l * output_channel,
-        c_out=output_channel,
-        results1=output_array,
-        results2=vani_output
+            len=l * output_channel,
+            c_out=output_channel,
+            results1=output_array,
+            results2=vani_output
     )
 
     print('The accumulated abs error: %.4f' % accu_error)
+
     
-
-    print(dev_buf)
-
     '''
-    
-    # mapping check
-
-    in_map = dev_imap.clone().detach().cpu().numpy()
-    out_map = dev_omap.clone().detach().cpu().numpy()
-
-    print("input map")
-    for i in range(input_nnz):
-        k = dev_icsr[i]
-        while(k < dev_icsr[i + 1]):
-            # if (in_map[i, k] == -1):
-            #     break
-            print("%d" % (in_map[k]))
-            k += 1
-        
-        print("----------")
-    
-    
     # backward validation
 
     output_grad = np.random.uniform(0, 1, size=(l, output_channel))

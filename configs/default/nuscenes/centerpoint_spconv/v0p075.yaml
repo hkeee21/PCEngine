@@ -1,0 +1,11 @@
+dataset:
+  train_max_points: 120000
+  val_max_points: 160000
+  voxel_size: [0.075, 0.2, 0.075]
+  pc_area_scope: [[-54, 54], [-3, 5], [-54, 54]]
+  rotation_bound: [-0.78539816, 0.78539816]
+  scale_bound: [0.9, 1.1]
+  translation_std: 0.5
+
+batch_size: 24
+

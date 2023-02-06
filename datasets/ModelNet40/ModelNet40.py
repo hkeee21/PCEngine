@@ -25,6 +25,7 @@ def resample_mesh(mesh_cad, density=1):
         P = (1 - \sqrt{r_1})A + \sqrt{r_1} (1 - r_2) B + \sqrt{r_1} r_2 C
       \end{align}
     """
+    np.random.seed(7)
     faces = np.array(mesh_cad.triangles).astype(int)
     vertices = np.array(mesh_cad.vertices)
 
@@ -70,13 +71,14 @@ def resample_mesh(mesh_cad, density=1):
 
 
 class ModelNet40Dataset(torch.utils.data.Dataset):
-    def __init__(self, transform=None):
+    def __init__(self, transform=None, item="bookshelf", voxel_size=0.01):
         self.files = []
         self.data_objects = []
         self.transform = transform
+        self.voxel_size = voxel_size
 
         self.root = "/home/eva_data/hongke21/datasets/ModelNet40"
-        fnames = glob.glob(os.path.join(self.root, "bookshelf/test/*.off"))
+        fnames = glob.glob(os.path.join(self.root, item + "/test/*.off"))
         fnames = sorted([os.path.relpath(fname, self.root) for fname in fnames])
         self.files = fnames
         assert len(self.files) > 0, "No file loaded"
@@ -115,7 +117,8 @@ class ModelNet40Dataset(torch.utils.data.Dataset):
             xyz, feats = self.transform(xyz, feats)
 
         # Get coords
-        coords, inds = sparse_quantize(xyz, voxel_size=0.02, return_index=True)
+        xyz -= np.min(xyz, axis=0, keepdims=True)
+        coords, inds = sparse_quantize(xyz, voxel_size=self.voxel_size, return_index=True)
         # Use color or other features if available
         feats = np.random.uniform(0, 1, size=(coords.shape[0], 4)) 
         coords = torch.as_tensor(coords, dtype=torch.int)

@@ -14,8 +14,12 @@ class KITTIDataset(torch.utils.data.Dataset):
         for i in range(size): # size < 100
             if i < 10:
                 file = (path + '00000%s.bin' % i)
-            else:
+            elif i < 100:
                 file = (path + '0000%s.bin' % i)
+            elif i < 1000:
+                file = (path + '000%s.bin' % i)
+            elif i < 10000:
+                file = (path + '00%s.bin' % i)
             data = np.fromfile(str(file), dtype=np.float32).reshape(-1, 4)
             files[i] = data
         self.files = files

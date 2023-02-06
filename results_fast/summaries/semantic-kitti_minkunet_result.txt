@@ -1,0 +1,4 @@
+PCEngine,1 frame,1.0,fp32,3.8984s ± 0.0000s,38.9842ms per sample,
+PCEngine,1 frame,0.5,fp32,2.0843s ± 0.0000s,20.8432ms per sample,
+PCEngine,1 frame,1.0,fp16,3.1959s ± 0.0000s,31.9586ms per sample,
+PCEngine,1 frame,0.5,fp16,1.9838s ± 0.0000s,19.8381ms per sample,

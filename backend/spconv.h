@@ -8,18 +8,33 @@
 
 extern "C"
 
-void ConvolutionForward(const at::Tensor in_feats, 
-                        const at::Tensor kernel, 
+void ConvolutionForward(at::Tensor in_feats, 
+                        at::Tensor kernel, 
                         const int kernel_size_code, 
                         const int sum_nnz, 
                         at::Tensor out_feats, 
-                        const at::Tensor kernel_nnz,
-                        const at::Tensor kernel_pos, 
+                        const at::Tensor kernel_kpos, 
+                        const at::Tensor kernel_qkpos,
                         const at::Tensor in_map, 
                         const at::Tensor out_map,
                         const at::Tensor in_csr, 
                         const at::Tensor out_csr, 
                         at::Tensor buffer, 
+                        const bool separate_mid, 
+                        const bool TensorCoreMode
+                        );
+
+
+void ConvolutionForwardBlockFused(
+                        const at::Tensor in_feats, 
+                        const at::Tensor kernel, 
+                        const int ksize_code, 
+                        const int sum_nnz, 
+                        at::Tensor out_feats, 
+                        const at::Tensor kpos, 
+                        const at::Tensor qkpos, 
+                        const at::Tensor in_map, 
+                        const at::Tensor out_map, 
                         const bool separate_mid, 
                         const bool TensorCoreMode
                         );
@@ -41,3 +56,4 @@ void ConvolutionBackward(const at::Tensor out_feats_grad,
                         at::Tensor buffer, 
                         const bool TensorCoreMode
                         );
+

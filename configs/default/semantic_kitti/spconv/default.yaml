@@ -1,0 +1,4 @@
+model:
+  backend: spconv
+  kmap_mode: hashmap
+  enable_fp16: False

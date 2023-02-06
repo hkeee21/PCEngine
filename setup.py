@@ -6,10 +6,10 @@ from version import __version__
 sources = [os.path.join('backend', f'pybind_cuda.cpp'), os.path.join('backend', f'spconv.cu'), os.path.join('backend', f'hash.cu')]
 
 setup(
-    name='dgCloud',
+    name='PCEngine',
     version=__version__,
     ext_modules=[
-        CUDAExtension('dgCloud.backend',
+        CUDAExtension('PCEngine.backend',
             sources=sources,
             extra_compile_args = {
                 'cxx': ['-g', '-O3', '-fopenmp', '-lgomp'],

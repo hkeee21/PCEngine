@@ -4,33 +4,37 @@ from typing import Dict, Union, Tuple, List
 class spTensor:
 
     def __init__(self,
-                 feats: torch.FloatTensor,
-                 coords: torch.IntTensor,
+                 feats: torch.Tensor,
+                 coords: torch.Tensor,
                  buffer: torch.Tensor, 
-                 stride: int=329
+                 batchsize: int=1, 
+                 stride: int=329,
+                 init_tag: list=['end']
                  ) -> None:
         self.feats = feats
         # TODO: coords can be added to cbook
         self.coords = coords
         self.stride = stride
+        self.batchsize = batchsize
         self.buffer = buffer
         self.kmaps: Dict[Tuple[int, int]] = {}
         self.cbook: Dict[int] = {}
+        self.init_tag = init_tag
     
     @property
-    def F(self) -> torch.FloatTensor:
+    def F(self) -> torch.Tensor:
         return self.feats
 
     @F.setter
-    def F(self, feats: torch.FloatTensor) -> None:
+    def F(self, feats: torch.Tensor) -> None:
         self.feats = feats
 
     @property
-    def C(self) -> torch.IntTensor:
+    def C(self) -> torch.Tensor:
         return self.coords
 
     @C.setter
-    def C(self, coords: torch.IntTensor) -> None:
+    def C(self, coords: torch.Tensor) -> None:
         self.coords = coords
 
     def cpu(self):
@@ -73,7 +77,9 @@ class spTensor:
     def __add__(self, other):
         output = spTensor(coords=self.coords,
                               feats=self.feats + other.feats,
+                              batchsize=self.batchsize,
                               stride=self.stride,
+                              init_tag=self.init_tag,
                               buffer=self.buffer)
         output.cbook = self.cbook
         output.kmaps = self.kmaps

@@ -1,0 +1,84 @@
+criterion:
+  name: sigmoid-focal
+  gamma: 2.0
+  alpha: 0.25
+
+optimizer:
+  name: adam_onecycle
+  lr: 0.001
+  weight_decay: 0.01
+
+scheduler:
+  name: onecycle
+  momentums: [0.95, 0.85]
+  div_factor: 10
+  pct_start: 0.4
+  
+num_epochs: 20
+
+model:
+  backend: spconv
+  kmap_mode: grid
+  spatial_shape: [1024, 41, 1024]
+  name: centerpoint
+  enable_fp16: False
+  box_code_cfg: 
+    code_size: 9
+    encode_angle_by_sincos: True
+  in_channels: 6
+  use_multihead: True
+  use_direction_classifier: False
+  cls_weight: 1.0
+  reg_weight: 0.25
+  dir_weight: 0.2
+  dir_offset: 0.785398
+  dir_limit_offset: 0.0
+  num_dir_bins: 2
+  last_kernel_size: 3
+  reg_config:
+    shared_channels: 64
+    num_middle_layers: 1
+    mid_channels: 64
+    reg_list:
+      reg: 2
+      height: 1
+      size: 3
+      angle: 2
+      velo: 2
+  rpn_head_configs: [
+      {
+          'head_cls_name': ['car']
+      },
+      {
+          'head_cls_name': ['truck', 'construction_vehicle']
+      },
+      {
+          'head_cls_name': ['bus', 'trailer']
+      },
+      {
+          'head_cls_name': ['barrier']
+      },
+      {
+          'head_cls_name': ['motorcycle', 'bicycle']
+      },
+      {
+          'head_cls_name': ['pedestrian', 'traffic_cone']
+      }
+  ]
+  backbone_2d_configs: 
+    num_channels: [128, 256]
+    layer_nums: [5, 5]
+    stride: [1, 2]
+    up_num_channels: [256, 256]
+    up_stride: [1, 2]
+  
+  loss_cfg:
+    code_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2]    
+
+  nms_configs:
+    roi_threshold: 0.1
+    nms_threshold: 0.2
+    joint_nms: False
+    before_nms_max: 1000
+    after_nms_max: 83
+  
