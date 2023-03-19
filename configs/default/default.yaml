@@ -1,14 +1,28 @@
 workers_per_gpu: 1
 evaluation_frequency: 1
 
-resnet_tag: ['whole', 
-       'whole', 'whole', 
-       'whole', 'whole', 
-       'whole', 'whole', 'whole', 
-       'end']
 
-unet_tag: ['whole', 'whole', 'whole', 
-        'whole', 'whole', 
-        'whole', 'whole', 
-        'whole', 'whole', 'end']
+# resnet_tag: ['whole', 
+#        'whole', 'whole', 
+#        'whole', 'whole', 
+#        'whole', 'whole', 'whole', 
+#        'end']
+
+# unet_tag: ['whole', 'whole', 'whole', 
+#         'whole', 'whole', 
+#         'whole', 'whole', 
+#         'whole', 'whole', 'end']
+
+resnet_tag: ['simple', 
+        'simple', 'simple', 
+        'simple', 'simple', 
+        'simple', 'simple', 'simple', 
+        'end']
+
+unet_tag: ['simple', 'simple', 'simple', 
+        'simple', 'simple', 
+        'simple', 'simple', 
+        'simple', 'simple', 'end']
+
+
 

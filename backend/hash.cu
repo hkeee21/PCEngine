@@ -48,21 +48,21 @@ at::Tensor HashMap(
     int *ocsr_ptr = ocsr.data_ptr<int>();
 
     // stride decoding
-    int l_stride_x = l_stride_code / 311;
-    int l_stride_y = (l_stride_code - l_stride_x * 311) / 17;
-    int l_stride_z = l_stride_code - l_stride_x * 311 - l_stride_y * 17;
+    int l_stride_x = l_stride_code / 94273;
+    int l_stride_y = (l_stride_code - l_stride_x * 94273) / 311;
+    int l_stride_z = l_stride_code - l_stride_x * 94273 - l_stride_y * 311;
 
-    int t_stride_x = t_stride_code / 311;
-    int t_stride_y = (t_stride_code - t_stride_x * 311) / 17;
-    int t_stride_z = t_stride_code - t_stride_x * 311 - t_stride_y * 17;
+    int t_stride_x = t_stride_code / 94273;
+    int t_stride_y = (t_stride_code - t_stride_x * 94273) / 311;
+    int t_stride_z = t_stride_code - t_stride_x * 94273 - t_stride_y * 311;
  
     int stride_x = l_stride_x * t_stride_x;
     int stride_y = l_stride_y * t_stride_y;
     int stride_z = l_stride_z * t_stride_z;
 
-    int k_size_x = k_size_code / 311;
-    int k_size_y = (k_size_code - k_size_x * 311) / 17;
-    int k_size_z = k_size_code - k_size_x * 311 - k_size_y * 17;
+    int k_size_x = k_size_code / 94273;
+    int k_size_y = (k_size_code - k_size_x * 94273) / 311;
+    int k_size_z = k_size_code - k_size_x * 94273 - k_size_y * 311;
 
     /********************************************************************/
     // default stream
@@ -264,21 +264,21 @@ at::Tensor HashMap_simple(
     int *qkpos_ptr = kernel_kpos.data_ptr<int>();
 
     // stride decoding
-    int l_stride_x = l_stride_code / 311;
-    int l_stride_y = (l_stride_code - l_stride_x * 311) / 17;
-    int l_stride_z = l_stride_code - l_stride_x * 311 - l_stride_y * 17;
+    int l_stride_x = l_stride_code / 94273;
+    int l_stride_y = (l_stride_code - l_stride_x * 94273) / 311;
+    int l_stride_z = l_stride_code - l_stride_x * 94273 - l_stride_y * 311;
 
-    int t_stride_x = t_stride_code / 311;
-    int t_stride_y = (t_stride_code - t_stride_x * 311) / 17;
-    int t_stride_z = t_stride_code - t_stride_x * 311 - t_stride_y * 17;
+    int t_stride_x = t_stride_code / 94273;
+    int t_stride_y = (t_stride_code - t_stride_x * 94273) / 311;
+    int t_stride_z = t_stride_code - t_stride_x * 94273 - t_stride_y * 311;
  
     int stride_x = l_stride_x * t_stride_x;
     int stride_y = l_stride_y * t_stride_y;
     int stride_z = l_stride_z * t_stride_z;
 
-    int k_size_x = k_size_code / 311;
-    int k_size_y = (k_size_code - k_size_x * 311) / 17;
-    int k_size_z = k_size_code - k_size_x * 311 - k_size_y * 17;
+    int k_size_x = k_size_code / 94273;
+    int k_size_y = (k_size_code - k_size_x * 94273) / 311;
+    int k_size_z = k_size_code - k_size_x * 94273 - k_size_y * 311;
 
     /********************************************************************/
     // default stream

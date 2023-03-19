@@ -54,9 +54,9 @@ extern "C"
   // int sum_nnz = in_buffer.size(0);
   // printf("sum nnz: %d", sum_nnz);
 
-  int ksx = ksize_code / 311;
-  int ksy = (ksize_code - ksx * 311) / 17;
-  int ksz = ksize_code - ksx * 311 - ksy * 17;
+  int ksx = ksize_code / 94273;
+  int ksy = (ksize_code - ksx * 94273) / 311;
+  int ksz = ksize_code - ksx * 94273 - ksy * 311;
   int mid_weight_id =
       (ksx - 1) / 2 * ksy * ksz + (ksy - 1) / 2 * ksz + (ksz - 1) / 2;
 
@@ -225,7 +225,7 @@ void ConvolutionForwardBlockFused(
     const at::Tensor in_feats, const at::Tensor kernel, const int ksize_code,
     const int sum_nnz, at::Tensor out_feats, const at::Tensor kpos,
     const at::Tensor qkpos, const at::Tensor in_map, const at::Tensor out_map,
-    const bool separate_mid, const bool TensorCoreFast) {
+    const bool separate_mid, const bool tf32) {
 
   int in_nnz = in_feats.size(0);
   int out_nnz = out_feats.size(0);
@@ -241,9 +241,9 @@ void ConvolutionForwardBlockFused(
   int *in_map_ptr = in_map.data_ptr<int>();
   int *out_map_ptr = out_map.data_ptr<int>();
 
-  int ksx = ksize_code / 311;
-  int ksy = (ksize_code - ksx * 311) / 17;
-  int ksz = ksize_code - ksx * 311 - ksy * 17;
+  int ksx = ksize_code / 94273;
+  int ksy = (ksize_code - ksx * 94273) / 311;
+  int ksz = ksize_code - ksx * 94273 - ksy * 311;
   int mid_weight_id =
       (ksx - 1) / 2 * ksy * ksz + (ksy - 1) / 2 * ksz + (ksz - 1) / 2;
 
@@ -260,7 +260,7 @@ void ConvolutionForwardBlockFused(
     DataType = CUDA_R_16F;
   } else {
     ComputeType =
-        TensorCoreFast ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F;
+        tf32 ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F;
     DataType = CUDA_R_32F;
   }
 
@@ -367,16 +367,27 @@ void ConvolutionForwardBlockFused(
                 kernel.data_ptr<float>(), out_feats.data_ptr<float>(),
                 in_map_ptr, out_map_ptr);
       } else {
-        fetch_on_demand_gemm_tf32<32, 4, 8, 16, 8, 16, 4, 2, 2>
-            <<<dim3(DIV_UP(out_channel, 32), DIV_UP(sum_nnz, 128), 1),
-               dim3(8, 32, 1)>>>(
+        if (tf32){
+          fetch_on_demand_gemm_tf32<32, 4, 8, 16, 8, 16, 4, 2, 2>
+              <<<dim3(DIV_UP(out_channel, 32), DIV_UP(sum_nnz, 128), 1),
+              dim3(8, 32, 1)>>>(
                 kpos.data_ptr<int>(), qkpos.data_ptr<int>(), k_vol, in_channel,
                 out_channel, in_feats.data_ptr<float>(),
                 kernel.data_ptr<float>(), out_feats.data_ptr<float>(),
                 in_map_ptr, out_map_ptr);
+        }
+        else{
+          fetch_on_demand_gemm_fp32<32, 4, 8>
+              <<<dim3(DIV_UP(out_channel, 32), DIV_UP(sum_nnz, 128), 1),
+              dim3(8, 32, 1)>>>(
+                kpos.data_ptr<int>(), qkpos.data_ptr<int>(), k_vol, in_channel,
+                out_channel, in_feats.data_ptr<float>(),
+                kernel.data_ptr<float>(), out_feats.data_ptr<float>(),
+                in_map_ptr, out_map_ptr);
+        }
       }
     } else {
-      gemm_float_fused_largeN_2<16, 8, 8>
+      fetch_on_demand_gemm_fp32_2<16, 8, 8>
           <<<dim3(DIV_UP(out_channel, 16), DIV_UP(sum_nnz, 128), 1),
              dim3(8, 16, 1)>>>(
               kpos.data_ptr<int>(), qkpos.data_ptr<int>(), k_vol, in_channel,
@@ -420,9 +431,9 @@ void ConvolutionBackward(const at::Tensor out_feats_grad,
 
   int *kpos_ptr = kernel_pos.data_ptr<int>();
 
-  int ksx = ksize_code / 311;
-  int ksy = (ksize_code - ksx * 311) / 17;
-  int ksz = ksize_code - ksx * 311 - ksy * 17;
+  int ksx = ksize_code / 94273;
+  int ksy = (ksize_code - ksx * 94273) / 311;
+  int ksz = ksize_code - ksx * 94273 - ksy * 311;
   int mid_weight_id =
       (ksx - 1) / 2 * ksy * ksz + (ksy - 1) / 2 * ksz + (ksz - 1) / 2;
 

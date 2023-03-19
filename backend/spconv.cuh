@@ -631,7 +631,7 @@ BLOCK_SIZE = 16, N_LOOP = 8, SKEW = 8,
 blockDim.x = 8, blockDim.y = 16
 */
 template <int BLOCK_SIZE, int N_LOOP, int SKEW>
-__global__ void gemm_float_fused_largeN_2(
+__global__ void fetch_on_demand_gemm_fp32_2(
     const int *__restrict__ kpos, const int *__restrict__ qkpos,
     const int k_vol, const int c_in, const int c_out,
     const float *__restrict__ in_f, const float *__restrict__ kw, float *out_f,
@@ -1263,6 +1263,7 @@ __global__ void fetch_on_demand_gemm_tf32(
     const int k_vol, const int c_in, const int c_out,
     const float *__restrict__ in_f, const float *__restrict__ kw, float *out_f,
     const int *imap, const int *omap) {
+#if __CUDA_ARCH__ >= 800
 
   // Block index
   const int bx = blockIdx.x;
@@ -1407,6 +1408,9 @@ __global__ void fetch_on_demand_gemm_tf32(
       }
     }
   }
+#else
+  #pragma message("TF32 kernels will not be compiled.")
+#endif
 }
 
 /*

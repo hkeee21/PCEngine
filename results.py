@@ -6,7 +6,8 @@ from itertools import repeat
 import time
 from torch.utils.cpp_extension import load
 from script.utils import CheckResultsWeight, binary_search, sparse_quantize, \
-    load_file, vanillaConv, CheckResults, vanillaConvBackward, build_conv_buffer, sparse_collate_fn
+    load_file, vanillaConv, CheckResults, vanillaConvBackward, \
+    build_conv_buffer, sparse_collate_fn, conv_info_encoder
 # from hashcublas.backend import mapping_cuda, conv_fwd_cuda
 from PCEngine.backend import mapping_cuda, conv_fwd_cuda, mapping_simple_cuda, conv_fwd_simple_cuda
 from configs.config import Config
@@ -21,14 +22,14 @@ if __name__ == '__main__':
     parser.add_argument('--dataflow', type=str, default='D1')
     args = parser.parse_args()
 
-    save_name = 'v04-b1-k333-s121-i16-o16-FP32'
+    save_name = 'v04-b1-k333-s111-i32-o32-FP32'
     data_type = torch.float
     batchsize = 1
     # real data test
-    input_channel, kernel_size = 16, [3, 3, 3]
-    output_channel = 16
+    input_channel, kernel_size = 32, [3, 3, 3]
+    output_channel = 32
     layer_stride = [1, 1, 1]
-    kernel_size_code = 311 * kernel_size[0] + 17 * kernel_size[1] + kernel_size[2] 
+    kernel_size_code = conv_info_encoder(kernel_size)
     kernel_volume = np.prod(kernel_size, dtype=int)
 
     coord, _, pcd = load_file("data/1.ply")
@@ -54,48 +55,6 @@ if __name__ == '__main__':
 
     dev_coords = coords.to(device)
     dev_feats = feats.to(device)
-    '''
-
-    kernel_size, input_channel, output_channel, batchsize = [3, 3, 3], 6, 64, 1
-    kernel_size_code = 311 * kernel_size[0] + 17 * kernel_size[1] + kernel_size[2] 
-    kernel_volume = np.prod(kernel_size, dtype=int)
-
-    torch.backends.cudnn.benchmark = False
-
-    config_file = f"configs/default/nuscenes_lidarseg/default.yaml"
-
-    configs = Config()
-    configs.reload(config_file, recursive=True)
-    configs.model.cr = 1.0
-    configs.model.enable_fp16 = True
-    configs.dataset.max_sweeps = 1
-
-    dataset = make_dataset(configs, 100)
-
-    dataflow = torch.utils.data.DataLoader(
-                    dataset,
-                    batch_size=1,
-                    # num_workers=configs.workers_per_gpu,
-                    pin_memory=False,
-                    collate_fn=sparse_collate_fn,
-                    shuffle=False
-                )
-
-    enable_fp16 = configs.model.enable_fp16
-
-    data_type = torch.float
-    if enable_fp16:
-        data_type = torch.half
-
-    for i, feed_dict in enumerate(dataflow):
-        inputs = feed_dict["pts_input"].to(device)
-        break
-
-    input_nnz = inputs.coords.shape[0]
-    if enable_fp16:
-        inputs.feats = inputs.feats.half()
-    
-    '''
 
     # To generate the weights
     weights = np.random.uniform(0, 1, size=(kernel_volume, input_channel, output_channel))
@@ -110,11 +69,11 @@ if __name__ == '__main__':
     dev_icsr = torch.zeros((batchsize * input_nnz + 2), dtype=torch.int).to(device)
     dev_ocsr = torch.zeros(((batchsize * input_nnz + 2) * 2), dtype=torch.int).to(device)
 
-    layer_stride_code = 311 * layer_stride[0] + 17 * layer_stride[1] + layer_stride[2]
+    layer_stride_code = conv_info_encoder(layer_stride)
     # make sure the input coordinates are at least tensor stride away from each other
     # TODO: can be further fused into the random data generator
     tensor_stride = [1, 1, 1]
-    tensor_stride_code = 311 * tensor_stride[0] + 17 * tensor_stride[1] + tensor_stride[2]
+    tensor_stride_code = conv_info_encoder(tensor_stride)
 
     separate_mid = (layer_stride[0] * layer_stride[1] * layer_stride[2]) == 1
 

@@ -1,2 +1,0 @@
-PCEngine,10 frame,1.0,fp32,4.1840s ± 0.0000s,41.8405ms per sample,
-PCEngine,10 frame,1.0,fp16,4.2095s ± 0.0000s,42.0951ms per sample,

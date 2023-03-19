@@ -259,7 +259,7 @@ class conv_d2(Function):
                 qsum_nnz: int, 
                 nnz: Tuple[int, int], 
                 transposed: bool, 
-                tensorcore: bool,
+                tf32: bool,
                 ) -> torch.Tensor:
         
         in_feats = in_feats.contiguous()
@@ -268,6 +268,11 @@ class conv_d2(Function):
         omap = omap.contiguous()
 
         separate_mid = (nnz[0] == nnz[1])
+
+        # check if the device supports tf32
+        device_capability = torch.cuda.get_device_capability()
+        device_capability = device_capability[0] * 100 + device_capability[1] * 10
+        tf32 = device_capability >= 800
 
         if transposed:
             output_feats = torch.zeros((nnz[0], out_channel), \
@@ -296,7 +301,7 @@ class conv_d2(Function):
                 omap,
                 imap, 
                 separate_mid, 
-                tensorcore
+                tf32
             )
         else:
             output_feats = torch.zeros((nnz[1], out_channel), \
@@ -325,12 +330,12 @@ class conv_d2(Function):
                 imap,
                 omap,
                 separate_mid, 
-                tensorcore
+                tf32
             )
 
     
         # TODO: replace in_feats with gathered features in in_buffer
-        ctx.for_backwards = (in_feats, kernel, kpos, imap, omap, tensorcore)
+        ctx.for_backwards = (in_feats, kernel, kpos, imap, omap, tf32)
         
         return output_feats
 
@@ -393,7 +398,7 @@ def conv_func(input, in_channel, out_channel, kernel,
             out_feats = conv_d1.apply(
                 input.feats, kmap[4], kmap[5], kmap[0], kmap[1], kmap[2], kmap[3],
                 in_channel, out_channel, kernel, kernel_size_code, kmap[6], kmap[7], 
-                input.buffer, transposed, tensorcore
+                input.buffer, transposed, 1
             )
         elif len(kmap) == 6:
             out_feats = conv_d2.apply(
@@ -508,7 +513,7 @@ def conv_func(input, in_channel, out_channel, kernel,
             out_feats = conv_d1.apply(
                 input.feats, kmap[4], kmap[5], kmap[0], kmap[1], kmap[2], kmap[3],
                 in_channel, out_channel, kernel, kernel_size_code, kmap[6], kmap[7], 
-                input.buffer, transposed, tensorcore
+                input.buffer, transposed, 1
             )
         elif len(kmap) == 6:
             out_feats = conv_d2.apply(

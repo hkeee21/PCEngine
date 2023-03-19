@@ -3,7 +3,7 @@ PCEngine(v2.0.0) contains both `Gather-MM-Scatter` and `Fetch-on-Demand` dataflo
 
 ## Current Constraints 
 1. Gather-MM-Scatter dataflow: channel size % 2 == 0.
-2. Fetch-on-Demand dataflow: channel size % 2 == 0, CUDA_ARCH >= 800.
+2. Fetch-on-Demand dataflow: channel size % 2 == 0, CUDA_ARCH >= 700.
 
 ## Details on Gather-MM-Scatter
 1. Feature amount for each weight position is a multiple of _M_ for tiling purpose. _M_ can be adjusted by changing the **third input** of kernel `exclusive_scan_for_kernel_quantified` in `backend/hash.cu`. Current _M_ is set to 128.

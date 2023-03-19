@@ -64,7 +64,7 @@ def main(configs) -> None:
         ("waymo", "Waymo (1 frame) detection"),
         ("waymo", "Waymo (3 frames) detection"),
     ]
-    PRECISION = ["fp16", "fp32"]
+    PRECISION = ["fp32"]
 
     results = defaultdict(lambda: defaultdict(list))
     ratios = defaultdict(list)

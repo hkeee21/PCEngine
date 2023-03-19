@@ -226,13 +226,13 @@ def make_ntuple(x: Union[int, List[int], Tuple[int, ...], torch.Tensor],
 
 
 def conv_info_encoder(info: List[int]) -> int:
-    return 311 * info[0] + 17 * info[1] + info[2]
+    return 94273 * info[0] + 311 * info[1] + info[2]
 
 
 def conv_info_decoder(code: int) -> Tuple[int, int, int]:
-    code_x = code // 311
-    code_y = (code - code_x * 311) // 17
-    code_z = (code - code_x * 311 - code_y * 17)
+    code_x = code // 94273
+    code_y = (code - code_x * 94273) // 311 
+    code_z = (code - code_x * 94273 - code_y * 311)
 
     return (code_x, code_y, code_z)
 
@@ -252,7 +252,7 @@ def vanillaConv(
     in_c = torch.as_tensor(in_c, dtype=int)
     stride = torch.as_tensor(stride, dtype=int)
 
-    print(stride)
+    # print(stride)
 
     kofs_x = [(i - (ks[0] - 1) // 2) for i in range(ks[0])]
     kofs_y = [(i - (ks[1] - 1) // 2) for i in range(ks[1])]
