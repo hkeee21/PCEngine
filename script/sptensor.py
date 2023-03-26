@@ -8,7 +8,7 @@ class spTensor:
                  coords: torch.Tensor,
                  buffer: torch.Tensor, 
                  batchsize: int=1, 
-                 stride: int=329,
+                 stride: int=94585,
                  init_tag: list=['end']
                  ) -> None:
         self.feats = feats

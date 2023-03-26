@@ -118,13 +118,13 @@ def output_stride_compute(
     t_stride_code: int,
     transposed: bool = False
 ):
-    l_stride_x = l_stride_code // 311
-    l_stride_y = (l_stride_code - l_stride_x * 311) // 17
-    l_stride_z = (l_stride_code - l_stride_x * 311 - l_stride_y * 17)
+    l_stride_x = l_stride_code // 94273
+    l_stride_y = (l_stride_code - l_stride_x * 94273) // 311 
+    l_stride_z = (l_stride_code - l_stride_x * 94273 - l_stride_y * 311)
 
-    t_stride_x = t_stride_code // 311
-    t_stride_y = (t_stride_code - t_stride_x * 311) // 17
-    t_stride_z = (t_stride_code - t_stride_x * 311 - t_stride_y * 17)
+    t_stride_x = t_stride_code // 94273
+    t_stride_y = (t_stride_code - t_stride_x * 94273) // 311 
+    t_stride_z = (t_stride_code - t_stride_x * 94273 - t_stride_y * 311)
 
     if transposed:
         stride_x = t_stride_x // l_stride_x
@@ -135,7 +135,7 @@ def output_stride_compute(
         stride_y = t_stride_y * l_stride_y
         stride_z = t_stride_z * l_stride_z
     
-    return (311 * stride_x + 17 * stride_y + stride_z)
+    return (94273 * stride_x + 311 * stride_y + stride_z)
 
 
 def fapply(input: spTensor, fn: Callable[..., torch.Tensor], *args,
