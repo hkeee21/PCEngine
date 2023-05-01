@@ -1,5 +1,5 @@
 ## PCEngine
-PCEngine is an efficient **Engine** for sparse convolution inference in 3D **P**oint **C**louds. Generally, PCEngine proposes techniques including a novel CSR-coded mapping format, an indicator-assisted FGMS (Fused Gather-Matmul-Scatter) fusion scheme and an adaptive dataflow to improve sparse convolution inference performance.
+PCEngine is an efficient **Engine** for sparse convolution inference in 3D **P**oint **C**louds. Generally, PCEngine contains techniques including a novel CSR-coded mapping format, an indicator-assisted FGMS (Fused Gather-Matmul-Scatter) fusion scheme and an adaptive dataflow to improve sparse convolution inference performance.
 
 ## News
 [2023.05.01] The code will be released soon.
