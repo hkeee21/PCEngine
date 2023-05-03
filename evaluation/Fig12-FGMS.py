@@ -1,13 +1,13 @@
 ''' @ MLSys23 Artifacts Evaluation
     This code is to generate the ablation study results of the indicator-assisted 
-    segmented GEMM fusion scheme into a .csv file.
-        GEMM schemes: separate GEMMs, batched GEMMs, indicator-assisted segmented GEMM fusion.
+    segmented FGMS fusion scheme into a .csv file.
+        GEMM schemes: separate FGMSs, batched FGMSs, indicator-assisted segmented FGMS fusion.
         Benchmarks: {ModelNet40, S3DIS, KITTI}.
         Convolution setups: 
             input channel: 64
             output channel: 64
             kernel size: 3
-        Command: $ python3 ablation-GEMM.py --save-file ${filename}
+        Command: $ python3 ablation-FGMS.py --save-file ${filename}
 '''
 
 import pandas as pd
@@ -17,13 +17,13 @@ import os
 import ncu_report
 import sys
 sys.path.append('../')
-from lib.PCEngine.gemm_test import gemm_test
+from lib.PCEngine.fgms_test import fgms_test
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--save-file', type=str, default='Fig12-GEMM')
+parser.add_argument('--save-file', type=str, default='Fig12-FGMS')
 args = parser.parse_args()
 
-label_list = ['dataset', 'GEMM scheme', 'latency [ms]', 'normalized speedup', 'FLOPs', 'normalized utilization']
+label_list = ['dataset', 'scheme', 'latency [ms]', 'normalized speedup', 'FLOPs', 'normalized utilization']
 dataset_list = ['modelnet40', 's3dis', 'kitti']
 scheme_list = ['separate', 'batched', 'fused']
 dataset_col = []
@@ -42,7 +42,7 @@ def get_cf_metrics(action, cf_metrics):
 
 flops_array = np.zeros((len(dataset_list), len(scheme_list)))
 for d, dataset in enumerate(dataset_list):
-    prof_name = 'ncu-report/mlsys23-ae-gemm-test-' + dataset + '-3090.ncu-rep'
+    prof_name = 'ncu-report/mlsys23-ae-fgms-test-' + dataset + '-3090.ncu-rep'
     cf_metrics = ['sm__cycles_elapsed.avg.per_second', 
               'gpu__time_duration.sum', 
               'smsp__sass_thread_inst_executed_op_fadd_pred_on.sum.per_cycle_elapsed',
@@ -71,7 +71,7 @@ for i, dataset in enumerate(dataset_list):
     for j, scheme in enumerate(scheme_list):
         dataset_col.append(dataset)
         scheme_col.append(scheme)
-        latency_array[i, j] = gemm_test(scheme, dataset, False)
+        latency_array[i, j] = fgms_test(scheme, dataset, False)
 
 latency_array_base = np.expand_dims(np.max(latency_array, axis=1), axis=1)
 speedup_array = np.repeat(latency_array_base, len(scheme_list), axis=1) / latency_array

@@ -14,7 +14,7 @@ from .datasets.S3DIS import S3DISDataset
 from .datasets.KITTI import KITTIDataset
 
 
-def gemm_test(scheme: str, data: str, profile: bool):
+def fgms_test(scheme: str, data: str, profile: bool):
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     
     input_channel, output_channel, kernel_size = 64, 64, [3, 3, 3]
@@ -224,3 +224,4 @@ if __name__ == '__main__':
     parser.add_argument('--profile', type=bool, default=False)
     args = parser.parse_args()
 
+    fgms_test(args.scheme, args.dataset, args.profile)
