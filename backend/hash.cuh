@@ -95,7 +95,7 @@ __global__ void insertVal(
 The query function to build mapping for D1.
 */
 template<int _NNZS_PER_BLOCK, int _KOFS_THREADS>
-__global__ void queryHash_wholemap(
+__global__ void _queryhash_subm_gather_mm_scatter(
     // input nnz
     const int innz, 
     // output nnz
@@ -110,10 +110,6 @@ __global__ void queryHash_wholemap(
     const int ksz,  
     // kernel volume
     const int kv, 
-    // tensor stride
-    const int t_stride_x, 
-    const int t_stride_y, 
-    const int t_stride_z, 
     // hash table (value), (size, )
     const uint64_t *val, 
     // hash table (index), (size, )
@@ -151,10 +147,6 @@ __global__ void queryHash_wholemap(
         int kx = kp / (ksz * ksy) - (ksx - 1) / 2;
         int ky = (kp / ksz) % ksy - (ksy - 1) / 2;
         int kz = kp % ksz - (ksz - 1) / 2;
-        // expand kernel offsets by tensor stride
-        kx *= t_stride_x;
-        ky *= t_stride_y;
-        kz *= t_stride_z;
         // hash query
         uint64_t target_val = coord_hash(shm[threadIdx.y * 4], 
             shm[threadIdx.y * 4 + 1] + kx, shm[threadIdx.y * 4 + 2] + ky, 
@@ -175,12 +167,11 @@ __global__ void queryHash_wholemap(
     }
 }
 
-
 /*
-The query function to build mapping for D2.
+The query function to build mapping for D1.
 */
 template<int _NNZS_PER_BLOCK, int _KOFS_THREADS>
-__global__ void queryHash_simple(
+__global__ void _queryhash_sp_gather_mm_scatter(
     // input nnz
     const int innz, 
     // output nnz
@@ -195,10 +186,98 @@ __global__ void queryHash_simple(
     const int ksz,  
     // kernel volume
     const int kv, 
-    // tensor stride
-    const int t_stride_x, 
-    const int t_stride_y, 
-    const int t_stride_z, 
+    // stride
+    const int stride_x, 
+    const int stride_y, 
+    const int stride_z, 
+    // padding
+    const int padding_x, 
+    const int padding_y,
+    const int padding_z, 
+    // hash table (value), (size, )
+    const uint64_t *val, 
+    // hash table (index), (size, )
+    const int *idx, 
+    // input-major mapping, (innz * (kv))
+    int *imap,
+    // output-major mapping, (onnz * (kv))                 
+    int *omap,  
+    // the counter of nnz for each each kernel offsets, (kv - 1)               
+    int *knnz,
+    // whether to compute center kernel offset separately
+    bool separate_mid)             
+{
+    // a thread for a coord
+    int output_id = blockIdx.x * _NNZS_PER_BLOCK + threadIdx.y;  
+    // exclude illegal id number
+    if (output_id >= onnz){return;}
+    // shared mem to store the output coord
+    // TODO: with batch idx we can use int4 to read
+    __shared__ int shm[_NNZS_PER_BLOCK * 4];
+    shm[threadIdx.y * 4] = coord[output_id * 4];
+    shm[threadIdx.y * 4 + 1] = coord[output_id * 4 + 1] * stride_x - padding_x;
+    shm[threadIdx.y * 4 + 2] = coord[output_id * 4 + 2] * stride_y - padding_y;
+    shm[threadIdx.y * 4 + 3] = coord[output_id * 4 + 3] * stride_z - padding_z;
+    // decode kernel size
+    int mid_ks = (ksx - 1) / 2 * ksy * ksz + 
+        (ksy - 1) / 2 * ksz + (ksz - 1) / 2;
+#pragma unroll
+    for (int k = 0; ; k += _KOFS_THREADS){
+        int kp = k + threadIdx.x;
+        // 0 <= kp < kv
+        if (kp >= kv){break;}
+        // ignore w[0, 0, 0]
+        if (separate_mid && kp == mid_ks){continue;}
+        // corresponds to TorchSparse & SpConv
+        int kx = kp / (ksz * ksy) - (ksx - 1) / 2;
+        int ky = (kp / ksz) % ksy - (ksy - 1) / 2;
+        int kz = kp % ksz - (ksz - 1) / 2;
+        kx += (ksx % 2 == 0 || ksx == 1) ? 0 : 1;
+        ky += (ksy % 2 == 0 || ksy == 1) ? 0 : 1;
+        kz += (ksz % 2 == 0 || ksz == 1) ? 0 : 1;
+        // expand kernel offsets by tensor stride
+        // kx *= t_stride_x;
+        // ky *= t_stride_y;
+        // kz *= t_stride_z;
+        // hash query
+        uint64_t target_val = coord_hash(shm[threadIdx.y * 4], 
+            shm[threadIdx.y * 4 + 1] + kx, shm[threadIdx.y * 4 + 2] + ky, 
+            shm[threadIdx.y * 4 + 3] + kz);
+        uint64_t target_id = target_val % (uint64_t)size;
+        // find target or empty
+        while (val[target_id] != target_val && idx[target_id] > -1){
+            target_id = (target_id + 97) % size;
+        }
+        // set map = input id or -1
+        int input_id = idx[target_id];
+        if(input_id < 0 || input_id >= innz){continue;}
+        // writing into the map
+        int buffer_pos = atomicAdd(&knnz[kp], 1);
+        int buffer_code = buffer_encoder(kp, buffer_pos);
+        imap[input_id * kv + kp] = buffer_code;
+        omap[output_id * kv + kp] = buffer_code;
+    }
+}
+
+/*
+The query function to build mapping for D1.
+*/
+template<int _NNZS_PER_BLOCK, int _KOFS_THREADS>
+__global__ void _queryhash_subm_fetch_on_demand(
+    // input nnz
+    const int innz, 
+    // output nnz
+    const int onnz, 
+    // input coords hash table size
+    const int size, 
+    // output coords, (onnz, 3)
+    const int *__restrict__ coord,
+    // coded kernel size, f = 311x + 17y + z
+    const int ksx,
+    const int ksy, 
+    const int ksz,  
+    // kernel volume
+    const int kv, 
     // hash table (value), (size, )
     const uint64_t *val, 
     // hash table (index), (size, )
@@ -234,10 +313,92 @@ __global__ void queryHash_simple(
         int kx = kp / (ksz * ksy) - (ksx - 1) / 2;
         int ky = (kp / ksz) % ksy - (ksy - 1) / 2;
         int kz = kp % ksz - (ksz - 1) / 2;
-        // expand kernel offsets by tensor stride
-        kx *= t_stride_x;
-        ky *= t_stride_y;
-        kz *= t_stride_z;
+        // hash query
+        uint64_t target_val = coord_hash(shm[threadIdx.y * 4], 
+            shm[threadIdx.y * 4 + 1] + kx, shm[threadIdx.y * 4 + 2] + ky, 
+            shm[threadIdx.y * 4 + 3] + kz);
+        uint64_t target_id = target_val % (uint64_t)size;
+        // find target or empty
+        while (val[target_id] != target_val && idx[target_id] > -1){
+            target_id = (target_id + 97) % size;
+        }
+        // set map = input id or -1
+        int input_id = idx[target_id];
+        if(input_id < 0 || input_id >= innz){continue;}
+        // writing into the map
+        int buffer_pos = atomicAdd(&knnz[kp], 1);
+        int buffer_code = buffer_encoder(kp, buffer_pos);
+        map[kp * innz + input_id] = output_id;
+    }
+}
+
+
+/*
+The query function to build mapping for D2.
+*/
+template<int _NNZS_PER_BLOCK, int _KOFS_THREADS>
+__global__ void _queryhash_sp_fetch_on_demand(
+    // input nnz
+    const int innz, 
+    // output nnz
+    const int onnz, 
+    // input coords hash table size
+    const int size, 
+    // output coords, (onnz, 3)
+    const int *__restrict__ coord,
+    // coded kernel size, f = 311x + 17y + z
+    const int ksx,
+    const int ksy, 
+    const int ksz,  
+    // kernel volume
+    const int kv, 
+    // stride
+    const int stride_x, 
+    const int stride_y, 
+    const int stride_z, 
+    // padding
+    const int padding_x, 
+    const int padding_y,
+    const int padding_z, 
+    // hash table (value), (size, )
+    const uint64_t *val, 
+    // hash table (index), (size, )
+    const int *idx, 
+    // input-major mapping, (innz * (kv - 1))
+    int *map,
+    // the counter of nnz for each each kernel offsets, (kv - 1)               
+    int *knnz,
+    // whether to compute center kernel offset separately
+    bool separate_mid)             
+{
+    // a thread for a coord
+    int output_id = blockIdx.x * _NNZS_PER_BLOCK + threadIdx.y;  
+    // exclude illegal id number
+    if (output_id >= onnz){return;}
+    // shared mem to store the output coord
+    // TODO: with batch idx we can use int4 to read
+    __shared__ int shm[_NNZS_PER_BLOCK * 4];
+    shm[threadIdx.y * 4] = coord[output_id * 4];
+    shm[threadIdx.y * 4 + 1] = coord[output_id * 4 + 1] * stride_x - padding_x;
+    shm[threadIdx.y * 4 + 2] = coord[output_id * 4 + 2] * stride_y - padding_y;
+    shm[threadIdx.y * 4 + 3] = coord[output_id * 4 + 3] * stride_z - padding_z;
+    // decode kernel size
+    int mid_ks = (ksx - 1) / 2 * ksy * ksz + 
+        (ksy - 1) / 2 * ksz + (ksz - 1) / 2;
+#pragma unroll
+    for (int k = 0; ; k += _KOFS_THREADS){
+        int kp = k + threadIdx.x;
+        // 0 <= kp < kv
+        if (kp >= kv){break;}
+        // ignore w[0, 0, 0]
+        if (separate_mid && kp == mid_ks){continue;}
+        // corresponds to TorchSparse & SpConv
+        int kx = kp / (ksz * ksy) - (ksx - 1) / 2;
+        int ky = (kp / ksz) % ksy - (ksy - 1) / 2;
+        int kz = kp % ksz - (ksz - 1) / 2;
+        kx += (ksx % 2 == 0 || ksx == 1) ? 0 : 1;
+        ky += (ksy % 2 == 0 || ksy == 1) ? 0 : 1;
+        kz += (ksz % 2 == 0 || ksz == 1) ? 0 : 1;
         // hash query
         uint64_t target_val = coord_hash(shm[threadIdx.y * 4], 
             shm[threadIdx.y * 4 + 1] + kx, shm[threadIdx.y * 4 + 2] + ky, 
@@ -389,6 +550,17 @@ __global__ void coordsDownsampleExpand(
                 const int stride_x,
                 const int stride_y, 
                 const int stride_z, 
+                // padding of each dimension
+                const int padding_x, 
+                const int padding_y, 
+                const int padding_z, 
+                // coords boundary
+                const int min_x,
+                const int min_y, 
+                const int min_z, 
+                const int max_x, 
+                const int max_y, 
+                const int max_z, 
                 // input coordinates, (innz, 4)
                 const int *__restrict__ icoords, 
                 // coded downsampled output coords hashtable
@@ -406,24 +578,34 @@ __global__ void coordsDownsampleExpand(
     for (int k = 0; ; k += blockDim.x){
         int kp = k + threadIdx.x;
         if (kp >= kv) {break;}
+        // int kx = kp / (ksz * ksy) - (ksx - 1) / 2;
+        // int ky = (kp / ksz) % ksy - (ksy - 1) / 2;
+        // int kz = kp % ksz - (ksz - 1) / 2;
+        // corresponds to SpConv & TorchSparse
         int kx = kp / (ksz * ksy) - (ksx - 1) / 2;
         int ky = (kp / ksz) % ksy - (ksy - 1) / 2;
         int kz = kp % ksz - (ksz - 1) / 2;
+        kx += (ksx % 2 == 0 || ksx == 1) ? 0 : 1;
+        ky += (ksy % 2 == 0 || ksy == 1) ? 0 : 1;
+        kz += (ksz % 2 == 0 || ksz == 1) ? 0 : 1;
         // expand
-        kx *= t_stride_x;
-        ky *= t_stride_y;
-        kz *= t_stride_z;
+        // kx *= t_stride_x;
+        // ky *= t_stride_y;
+        // kz *= t_stride_z;
         // candidate
-        int cand_x = shm[threadIdx.y * 4 + 1] + kx;
-        int cand_y = shm[threadIdx.y * 4 + 2] + ky;
-        int cand_z = shm[threadIdx.y * 4 + 3] + kz;
+        int cand_x = shm[threadIdx.y * 4 + 1] - kx + padding_x;
+        int cand_y = shm[threadIdx.y * 4 + 2] - ky + padding_y;
+        int cand_z = shm[threadIdx.y * 4 + 3] - kz + padding_z;
+        int cand_x_div = cand_x / stride_x;
+        int cand_y_div = cand_y / stride_y;
+        int cand_z_div = cand_z / stride_z;
         // condition
-        if ((cand_x < 0) || (cand_x % stride_x != 0)){continue;}
-        if ((cand_y < 0) || (cand_y % stride_y != 0)){continue;}
-        if ((cand_z < 0) || (cand_z % stride_z != 0)){continue;}
-        // write hashtable
+        if ((cand_x_div < min_x) || (cand_x_div > max_x) || (cand_x % stride_x != 0)){continue;}
+        if ((cand_y_div < min_y) || (cand_y_div > max_y) || (cand_y % stride_y != 0)){continue;}
+        if ((cand_z_div < min_z) || (cand_z_div > max_z) || (cand_z % stride_z != 0)){continue;}
+        // write into hashtable
         ocoords_code[nid * kv + kp] = 
-            ((shm[threadIdx.y * 4] * _BOUND + cand_x) * _BOUND + cand_y) * _BOUND + cand_z;
+            ((shm[threadIdx.y * 4] * _BOUND + cand_x_div) * _BOUND + cand_y_div) * _BOUND + cand_z_div;
     }
 }
 

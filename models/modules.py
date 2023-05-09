@@ -17,12 +17,14 @@ class SparseConvBlock(nn.Sequential):
                  out_channels: int,
                  kernel_size: Union[int, List[int], Tuple[int, ...]],
                  stride: Union[int, List[int], Tuple[int, ...]] = 1,
+                 padding: Union[int, List[int], Tuple[int, ...]] = 0,
                  dilation: int = 1) -> None:
         super().__init__(
             conv3d(in_channels=in_channels,
                     out_channels=out_channels,
                     kernel_size=kernel_size,
-                    stride=stride
+                    stride=stride,
+                    padding=padding
                     ),
             BatchNorm(out_channels),
             ReLU(True),

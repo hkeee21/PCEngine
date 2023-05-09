@@ -56,7 +56,7 @@ class NuScenes(DetectionDataset):
         feats = updated_input_dict['feats']
         # print(locs.max(axis=0))
         # subsample
-        return {'pts_input': spTensor(feats, locs, buffer=None)}
+        return {'pts_input': spTensor(feats, locs, buffer=None, coords_min=None, coords_max=None)}
 
     def get_sweep(self, sweep_info):
         def remove_ego_points(points, center_radius=1.0):

@@ -9,7 +9,7 @@ from .sptensor import spTensor
 from typing import Dict, List, Tuple, Union
 from PCEngine.backend import mapping_cuda, mapping_simple_cuda, \
     conv_fwd_cuda, conv_fwd_simple_cuda, conv_bwd_cuda
-from .utils import output_stride_compute, conv_info_encoder
+from .utils import output_stride_compute, conv_info_encoder, conv_info_decoder
 
 
 class conv3d(nn.Module):
@@ -19,6 +19,7 @@ class conv3d(nn.Module):
                  out_channels: int = 32,
                  kernel_size: Union[int, List[int]] = 3,
                  stride: Union[int, List[int]] = 1,
+                 padding: Union[int, List[int]] = 0,
                  bias: bool = False, 
                  transposed: bool = False, 
                  tc_mode: bool = True
@@ -37,6 +38,7 @@ class conv3d(nn.Module):
         self.kernel_size_code = conv_info_encoder(self.kernel_size)
         self.kernel_volume = np.prod(self.kernel_size, dtype=int)
         
+        # stride coding
         if isinstance(stride, int):
             self.stride = [stride, stride, stride]
         elif isinstance(stride, list):
@@ -44,6 +46,15 @@ class conv3d(nn.Module):
         else:
             raise NotImplementedError
         self.stride_code = conv_info_encoder(self.stride)
+
+         # padding coding
+        if isinstance(padding, int):
+            self.padding = [padding, padding, padding]
+        elif isinstance(padding, list):
+            self.padding = padding
+        else:
+            raise NotImplementedError
+        self.padding_code = conv_info_encoder(self.padding)
 
         self.tensorcore = tc_mode
         
@@ -80,6 +91,7 @@ class conv3d(nn.Module):
                         kernel=self.kernel,
                         kernel_size_code=self.kernel_size_code,
                         stride_code=self.stride_code,
+                        padding_code=self.padding_code, 
                         bias=self.bias, 
                         transposed=self.transposed, 
                         tensorcore=self.tensorcore
@@ -131,75 +143,22 @@ class conv_d1(Function):
             output_feats = torch.zeros((nnz[0], out_channel), \
                 dtype=in_feats.dtype, device=in_feats.device)
 
-            '''kernel_volume = kernel.shape[0]
-            kernel_x = kernel_size_code // 311
-            kernel_y = (kernel_size_code - kernel_x * 311) // 17
-            kernel_z = (kernel_size_code - kernel_x * 311 - kernel_y * 17)
-            mid_weight = (kernel_x - 1) // 2 * kernel_y * kernel_z + \
-                (kernel_y - 1) // 2 * kernel_z + (kernel_z - 1) // 2
-            print("%d %d %d %d" % (nnz[1], kernel.shape[1], kernel.shape[2], kernel_volume), end=" ")
-            for i in range(kernel_volume):
-                if i == mid_weight and separate_mid and knnz[i] == 0:
-                    print("%d" % nnz[0], end=" ")
-                elif i == kernel_volume - 1:
-                    print("%d" % knnz[i])
-                else:
-                    print("%d" % knnz[i], end=" ")'''
-
             conv_fwd_cuda(
-                in_feats,
-                kernel,
-                kernel_size_code, 
-                sum_nnz, 
-                output_feats,
-                kpos,
-                qkpos, 
-                omap,
-                imap,
-                ocsr,
-                icsr, 
-                buffer, 
-                separate_mid, 
-                tensorcore
+                in_feats, kernel, kernel_size_code, 
+                sum_nnz, output_feats, kpos, qkpos, 
+                omap, imap, ocsr, icsr, buffer, 
+                separate_mid, tensorcore
             )
         else:
             output_feats = torch.zeros((nnz[1], out_channel), \
                 dtype=in_feats.dtype, device=in_feats.device)
 
-            '''kernel_volume = kernel.shape[0]
-            kernel_x = kernel_size_code // 311
-            kernel_y = (kernel_size_code - kernel_x * 311) // 17
-            kernel_z = (kernel_size_code - kernel_x * 311 - kernel_y * 17)
-            mid_weight = (kernel_x - 1) // 2 * kernel_y * kernel_z + \
-                (kernel_y - 1) // 2 * kernel_z + (kernel_z - 1) // 2
-            print("%d %d %d %d" % (nnz[1], kernel.shape[1], kernel.shape[2], kernel_volume), end=" ")
-            for i in range(kernel_volume):
-                if i == mid_weight and separate_mid and knnz[i] == 0:
-                    print("%d" % nnz[0], end=" ")
-                elif i == kernel_volume - 1:
-                    print("%d" % knnz[i])
-                else:
-                    print("%d" % knnz[i], end=" ")'''
-
             conv_fwd_cuda(
-                in_feats,
-                kernel,
-                kernel_size_code, 
-                sum_nnz, 
-                output_feats,
-                kpos,
-                qkpos, 
-                imap,
-                omap,
-                icsr,
-                ocsr, 
-                buffer, 
-                separate_mid, 
-                tensorcore
+                in_feats, kernel, kernel_size_code, 
+                sum_nnz, output_feats, kpos, qkpos, 
+                imap, omap, icsr, ocsr, buffer, 
+                separate_mid, tensorcore
             )
-
-            # print("completed.")
-            # print(output_feats)
     
         # TODO: replace in_feats with gathered features in in_buffer
         ctx.for_backwards = (in_feats, kernel, kpos, imap, omap, \
@@ -278,59 +237,19 @@ class conv_d2(Function):
             output_feats = torch.zeros((nnz[0], out_channel), \
                 dtype=in_feats.dtype, device=in_feats.device)
 
-            '''conv_data = dict()
-            conv_data['in_feats'] = in_feats
-            conv_data['kernel'] = kernel
-            conv_data['ksize_code'] = kernel_size_code
-            conv_data['sum_nnz'] = sum_nnz
-            conv_data['knnz'] = knnz
-            conv_data['kpos'] = kpos
-            conv_data['imap'] = omap
-            conv_data['omap'] = imap
-            conv_data['out_nnz'] = nnz[0]
-            torch.save(conv_data, '/home/eva_data/hongke21/conv_data/MK-SKh-FP16/' + str(time.time()) + '.pth')'''
-
             conv_fwd_simple_cuda(
-                in_feats,
-                kernel,
-                kernel_size_code, 
-                qsum_nnz, 
-                output_feats,
-                kpos, 
-                qkpos, 
-                omap,
-                imap, 
-                separate_mid, 
-                tf32
+                in_feats, kernel, kernel_size_code, 
+                qsum_nnz, output_feats, kpos, qkpos, 
+                omap, imap, separate_mid, tf32
             )
         else:
             output_feats = torch.zeros((nnz[1], out_channel), \
                 dtype=in_feats.dtype, device=in_feats.device)
 
-            '''conv_data = dict()
-            conv_data['in_feats'] = in_feats
-            conv_data['kernel'] = kernel
-            conv_data['ksize_code'] = kernel_size_code
-            conv_data['sum_nnz'] = sum_nnz
-            conv_data['knnz'] = knnz
-            conv_data['kpos'] = kpos
-            conv_data['imap'] = imap
-            conv_data['omap'] = omap
-            conv_data['out_nnz'] = nnz[1]
-            torch.save(conv_data, '/home/eva_data/hongke21/conv_data/MK-SKh-FP16/' + str(time.time()) + '.pth')'''
-
             conv_fwd_simple_cuda(
-                in_feats,
-                kernel,
-                kernel_size_code, 
-                qsum_nnz, 
-                output_feats,
-                kpos, 
-                qkpos,
-                imap,
-                omap,
-                separate_mid, 
-                tf32
+                in_feats, kernel, kernel_size_code, 
+                qsum_nnz, output_feats, kpos, qkpos,
+                imap, omap, separate_mid, tf32
             )
 
     
@@ -358,16 +277,8 @@ class conv_d2(Function):
             dtype=torch.float, device=in_feats.device)
 
         conv_bwd_cuda(
-            out_feats_grad, 
-            in_feats,
-            kernel,
-            kernel_size,
-            in_feats_grad, 
-            weight_grad, 
-            knnz,
-            kpos, 
-            imap,
-            omap, 
+            out_feats_grad, in_feats, kernel, kernel_size,
+            in_feats_grad, weight_grad, knnz, kpos, imap, omap, 
             tensorcore
         )
 
@@ -375,8 +286,8 @@ class conv_d2(Function):
             weight_grad, None, None, None, None
 
 
-def conv_func(input, in_channel, out_channel, kernel, 
-    kernel_size_code, stride_code, bias, transposed, tensorcore):
+def conv_func(input, in_channel, out_channel, kernel, kernel_size_code, 
+              stride_code, padding_code, bias, transposed, tensorcore):
     
     input_size = input.coords.size(0)
     kernel_volume = kernel.size(0)
@@ -387,7 +298,8 @@ def conv_func(input, in_channel, out_channel, kernel,
         if bias is not None:
             out_feats += bias
         output = spTensor(coords=input.coords, feats=out_feats, buffer=input.buffer, \
-            batchsize=input.batchsize, stride=input.stride, init_tag=input.init_tag)
+            batchsize=input.batchsize, stride=input.stride, init_tag=input.init_tag, \
+            coords_max=input.coords_max, coords_min=input.coords_min)
     
     elif transposed: 
         output_stride = output_stride_compute(stride_code, input.stride, 1)
@@ -411,14 +323,18 @@ def conv_func(input, in_channel, out_channel, kernel,
         if bias is not None:
             out_feats += bias
         output = spTensor(feats=out_feats, coords=out_coords, buffer=input.buffer, 
-            batchsize=input.batchsize, stride=output_stride, init_tag=input.init_tag)
+            batchsize=input.batchsize, stride=output_stride, init_tag=input.init_tag, 
+            coords_max=input.coords_max, coords_min=input.coords_min)
 
     else:
         output_stride = output_stride_compute(stride_code, input.stride, 0)
         kmap = input.kmaps.get((kernel_size_code, input.stride, stride_code)) 
         out_coords = input.coords
 
-        separate_mid = (stride_code == conv_info_encoder([1, 1, 1]))
+        subm = (stride_code == conv_info_encoder([1, 1, 1]))
+
+        coords_max = [input.coords_max[i] for i in range(3)]
+        coords_min = [input.coords_min[i] for i in range(3)]
  
         if kmap is None:
 
@@ -432,11 +348,21 @@ def conv_func(input, in_channel, out_channel, kernel,
                     device=input.coords.device)
                 qkpos = torch.zeros((kernel_volume + 1), dtype=torch.int, \
                     device=input.coords.device)
+
+                stride = conv_info_decoder(stride_code)
+                if not subm:
+                    kernel_size = conv_info_decoder(kernel_size_code)
+                    padding = conv_info_decoder(padding_code)
+                    coords_max[0] = (input.coords_max[0] + 2 * padding[0] - (kernel_size[0] - 1)) // stride[0]
+                    coords_max[1] = (input.coords_max[1] + 2 * padding[1] - (kernel_size[1] - 1)) // stride[1]
+                    coords_max[2] = (input.coords_max[2] + 2 * padding[2] - (kernel_size[2] - 1)) // stride[2]
                 
                 out_coords = mapping_simple_cuda(
                     input.coords, input.batchsize, kernel_size_code, kernel_volume, 
-                    in_channel, out_channel, stride_code, input.stride, 
-                    imap, knnz, kpos, qkpos, separate_mid
+                    in_channel, out_channel, stride_code, input.stride, padding_code,
+                    coords_min[0], coords_min[1], coords_min[2], 
+                    coords_max[0], coords_max[1], coords_max[2], 
+                    imap, knnz, kpos, qkpos, subm
                 )
 
                 nonzero_idx = torch.nonzero(imap != -1)
@@ -474,15 +400,22 @@ def conv_func(input, in_channel, out_channel, kernel,
                 ocsr = torch.zeros(((input_size + 2) * 8), dtype=torch.int, \
                     device=input.coords.device)
 
+                stride = conv_info_decoder(stride_code)
+                if not subm:
+                    kernel_size = conv_info_decoder(kernel_size_code)
+                    padding = conv_info_decoder(padding_code)
+                    coords_max[0] = (input.coords_max[0] + 2 * padding[0] - (kernel_size[0] - 1)) // stride[0]
+                    coords_max[1] = (input.coords_max[1] + 2 * padding[1] - (kernel_size[1] - 1)) // stride[1]
+                    coords_max[2] = (input.coords_max[2] + 2 * padding[2] - (kernel_size[2] - 1)) // stride[2]
+
                 out_coords = mapping_cuda(
                     input.coords, kernel_size_code, kernel_volume, 
-                    in_channel, out_channel, stride_code, input.stride, 
-                    imap, omap, icsr, ocsr, knnz, kpos, qkpos, separate_mid
+                    in_channel, out_channel, stride_code, input.stride, padding_code, 
+                    coords_min[0], coords_min[1], coords_min[2], 
+                    coords_max[0], coords_max[1], coords_max[2], 
+                    imap, omap, icsr, ocsr, knnz, kpos, qkpos, subm
                 )
 
-                # knnz = knnz.cpu()
-                # sum_nnz = knnz.sum().int()
-                # print("sum nnz: %d" % sum_nnz)
                 qsum_nnz = qkpos[-1].cpu().int()
                 out_nnz = out_coords.size(0)
                 # print('out nnz: %d' % out_nnz)
@@ -498,14 +431,6 @@ def conv_func(input, in_channel, out_channel, kernel,
                 input.cbook[output_stride] = out_coords
                 input.init_tag = input.init_tag[1:]
 
-                # j = 0
-                # for i in range(input_size):
-                #     if(icsr[i] < icsr[i + 1]):
-                #         # print("%d-%d" % (imap[j] // 1186111, imap[j] % 1186111))
-                #         j += 1
-                # print("%.4f=%d/%d" % (sum_nnz/input_size, sum_nnz, input_size))
-                # print("-------------")
-            
             else:
                 raise NotImplementedError
 
@@ -526,7 +451,8 @@ def conv_func(input, in_channel, out_channel, kernel,
         if bias is not None:
             out_feats += bias
         output = spTensor(feats=out_feats, coords=out_coords, buffer=input.buffer, 
-            batchsize=input.batchsize, stride=output_stride, init_tag=input.init_tag)
+            batchsize=input.batchsize, stride=output_stride, init_tag=input.init_tag,
+            coords_max=coords_max, coords_min=coords_min)
     
     output.kmaps = input.kmaps
     output.cbook = input.cbook

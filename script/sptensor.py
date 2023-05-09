@@ -7,12 +7,13 @@ class spTensor:
                  feats: torch.Tensor,
                  coords: torch.Tensor,
                  buffer: torch.Tensor, 
+                 coords_min: list,
+                 coords_max: list, 
                  batchsize: int=1, 
                  stride: int=94585,
                  init_tag: list=['end']
                  ) -> None:
         self.feats = feats
-        # TODO: coords can be added to cbook
         self.coords = coords
         self.stride = stride
         self.batchsize = batchsize
@@ -20,6 +21,8 @@ class spTensor:
         self.kmaps: Dict[Tuple[int, int]] = {}
         self.cbook: Dict[int] = {}
         self.init_tag = init_tag
+        self.coords_min = coords_min
+        self.coords_max = coords_max
     
     @property
     def F(self) -> torch.Tensor:
@@ -80,7 +83,9 @@ class spTensor:
                               batchsize=self.batchsize,
                               stride=self.stride,
                               init_tag=self.init_tag,
-                              buffer=self.buffer)
+                              buffer=self.buffer,
+                              coords_max=self.coords_max,
+                              coords_min=self.coords_min)
         output.cbook = self.cbook
         output.kmaps = self.kmaps
         return output

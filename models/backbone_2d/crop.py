@@ -32,8 +32,11 @@ def spcrop(input: spTensor,
 
     mask = torch.all(mask, dim=1)
     coords, feats = coords[mask], feats[mask]
+    # coords_min = [0, 0, 0]
+    # coords_max = ((torch.max(coords[:, 1:], dim=0).values).cpu().numpy()).tolist()
     # hk: wonder if buffer is necessary
-    output = spTensor(coords=coords, feats=feats, stride=stride, buffer=None)
+    output = spTensor(coords=coords, feats=feats, 
+                      stride=stride, buffer=None, coords_max=None, coords_min=None)
     return output
 
 

@@ -16,7 +16,7 @@
 
 #include "cublas_utils.h"
 
-#define DIV_UP(x, y) (x + y - 1) / y
+#define DIV_UP(x, y) ((x) + (y) - 1) / (y)
 
 extern "C"
 

@@ -142,7 +142,8 @@ def fapply(input: spTensor, fn: Callable[..., torch.Tensor], *args,
            **kwargs) -> spTensor:
     feats = fn(input.feats, *args, **kwargs)
     output = spTensor(coords=input.coords, feats=feats, buffer=input.buffer, \
-        batchsize=input.batchsize, stride=input.stride, init_tag=input.init_tag)
+        batchsize=input.batchsize, stride=input.stride, init_tag=input.init_tag, \
+        coords_max=input.coords_max, coords_min=input.coords_min)
     output.cbook = input.cbook
     output.kmaps = input.kmaps
     return output
@@ -155,7 +156,9 @@ def cat(inputs: List[spTensor]) -> spTensor:
                           buffer=inputs[0].buffer, 
                           batchsize=inputs[0].batchsize, 
                           stride=inputs[0].stride,
-                          init_tag=inputs[0].init_tag)
+                          init_tag=inputs[0].init_tag, 
+                          coords_max=inputs[0].coords_max, 
+                          coords_min=inputs[0].coords_min)
     output.cbook = inputs[0].cbook
     output.kmaps = inputs[0].kmaps
     return output
@@ -186,8 +189,10 @@ def sparse_collate(inputs: List[spTensor]) -> spTensor:
 
     coords = torch.cat(coords, dim=0)
     feats = torch.cat(feats, dim=0)
+    coords_min = [0, 0, 0]
+    coords_max = ((torch.max(coords[:, 1:], dim=0).values).cpu().numpy()).tolist()
     output = spTensor(coords=coords, feats=feats, stride=stride, 
-        batchsize=k+1, buffer=None)
+        batchsize=k+1, buffer=None, coords_min=coords_min, coords_max=coords_max)
     return output
 
 

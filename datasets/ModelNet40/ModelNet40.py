@@ -123,6 +123,6 @@ class ModelNet40Dataset(torch.utils.data.Dataset):
         feats = np.random.uniform(0, 1, size=(coords.shape[0], 4)) 
         coords = torch.as_tensor(coords, dtype=torch.int)
         feats = torch.as_tensor(feats, dtype=torch.float)
-        input = spTensor(coords=coords, feats=feats, buffer=None)
+        input = spTensor(coords=coords, feats=feats, buffer=None, coords_min=None, coords_max=None)
 
         return {'input': input}

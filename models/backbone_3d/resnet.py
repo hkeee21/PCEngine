@@ -19,22 +19,22 @@ class SparseResNet(Backbone3DTemplate):
         # self.wrapper = wrapper.Wrapper(backend=self.backend)
 
         self.stem = nn.Sequential(
-            SparseConvBlock(in_channels, num_channels[0], 3),
+            SparseConvBlock(in_channels, num_channels[0], 3, stride=1, padding=1),
             SparseResBlock(num_channels[0], num_channels[0], 3),
             SparseResBlock(num_channels[0], num_channels[0], 3)
         )
         self.stage1 = nn.Sequential(
-            SparseConvBlock(num_channels[0], num_channels[1], 3, stride=[2, 2, 2]),
+            SparseConvBlock(num_channels[0], num_channels[1], 3, stride=[2, 2, 2], padding=1),
             SparseResBlock(num_channels[1], num_channels[1], 3),
             SparseResBlock(num_channels[1], num_channels[1], 3),
         )
         self.stage2 = nn.Sequential(
-            SparseConvBlock(num_channels[1], num_channels[2], 3, stride=[2, 2, 2]),
+            SparseConvBlock(num_channels[1], num_channels[2], 3, stride=[2, 2, 2], padding=1),
             SparseResBlock(num_channels[2], num_channels[2], 3),
             SparseResBlock(num_channels[2], num_channels[2], 3),
         )
         self.stage3 = nn.Sequential(
-            SparseConvBlock(num_channels[2], num_channels[3], 3, stride=[2, 2, 2]),
+            SparseConvBlock(num_channels[2], num_channels[3], 3, stride=[2, 2, 2], padding=[1, 0, 1]),
             SparseResBlock(num_channels[3], num_channels[3], 3),
             SparseResBlock(num_channels[3], num_channels[3], 3),
         )

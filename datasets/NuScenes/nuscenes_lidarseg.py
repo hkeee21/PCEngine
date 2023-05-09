@@ -24,5 +24,5 @@ class NuScenesLiDARSeg(NuScenes):
         points[:, :3] -= points[:, :3].min(0)
         coords, inds = sparse_quantize(points[:, :3], self.voxel_size, return_index=True)
         # subsample
-        return {'pts_input': spTensor(points[inds], coords, buffer=None)}
+        return {'pts_input': spTensor(points[inds], coords, buffer=None, coords_min=None, coords_max=None)}
 

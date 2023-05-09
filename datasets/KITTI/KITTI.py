@@ -41,6 +41,6 @@ class KITTIDataset(torch.utils.data.Dataset):
         # Use color or other features if available
         coords = torch.as_tensor(coords, dtype=torch.int)
         feats = torch.as_tensor(feat[inds], dtype=torch.float)
-        input = spTensor(coords=coords, feats=feats, buffer=None)
+        input = spTensor(coords=coords, feats=feats, buffer=None, coords_min=None, coords_max=None)
 
         return {'input': input}

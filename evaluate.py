@@ -56,10 +56,10 @@ def main(configs) -> None:
         torch.cuda.manual_seed(args.seed)
 
     BENCHMARKS = [
-        ("semantic_kitti", "SemanticKITTI (1x width) segmentation"),
-        ("semantic_kitti", "SemanticKITTI (0.5x width) segmentation"),
-        ("nuscenes_lidarseg", "nuScenes-LiDARSeg (1 frame) segmentation"),
-        ("nuscenes_lidarseg", "nuScenes-LiDARSeg (3 frames) segmentation"),
+        # ("semantic_kitti", "SemanticKITTI (1x width) segmentation"),
+        # ("semantic_kitti", "SemanticKITTI (0.5x width) segmentation"),
+        # ("nuscenes_lidarseg", "nuScenes-LiDARSeg (1 frame) segmentation"),
+        # ("nuscenes_lidarseg", "nuScenes-LiDARSeg (3 frames) segmentation"),
         ("nuscenes", "nuScenes detection"),
         ("waymo", "Waymo (1 frame) detection"),
         ("waymo", "Waymo (3 frames) detection"),
@@ -210,9 +210,10 @@ def main(configs) -> None:
 
                         start_time = cuda_time()
                         # torch.cuda.cudart().cudaProfilerStart()
-                        _ = model(inputs)
+                        output = model(inputs)
                         # torch.cuda.cudart().cudaProfilerStop()
                         times.append(cuda_time() - start_time)
+                        # print(output['pts_input'].feats.shape)
 
             fps = 1 / np.mean(times)
             # if backend == "torchsparse":

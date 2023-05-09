@@ -15,7 +15,7 @@
 #include <stdlib.h>
 #include <torch/extension.h>
 
-#define DIV_UP(x, y) (x + y - 1) / y
+#define DIV_UP(x, y) ((x) + (y) - 1) / (y)
 
 at::Tensor HashMap(
                 const at::Tensor in_coords, 
@@ -25,6 +25,13 @@ at::Tensor HashMap(
                 const int c_out, 
                 const int l_stride_code, 
                 const int t_stride_code, 
+                const int padding_code, 
+                const int min_x,
+                const int min_y,
+                const int min_z,
+                const int max_x,
+                const int max_y,
+                const int max_z,
                 at::Tensor imap,
                 at::Tensor omap,  
                 at::Tensor icsr,
@@ -63,6 +70,10 @@ at::Tensor HashMap(
     int k_size_x = k_size_code / 94273;
     int k_size_y = (k_size_code - k_size_x * 94273) / 311;
     int k_size_z = k_size_code - k_size_x * 94273 - k_size_y * 311;
+
+    int padding_x = padding_code / 94273;
+    int padding_y = (padding_code - padding_x * 94273) / 311;
+    int padding_z = padding_code - padding_x * 94273 - padding_y * 311;
 
     /********************************************************************/
     // default stream
@@ -132,12 +143,11 @@ at::Tensor HashMap(
 
         int64_t *ocoords_code_ptr = ocoords_code_space.data_ptr<int64_t>(); 
 
-        // coordsDownsample<3041><<<DIV_UP(in_nnz, 16), dim3(16, 1, 1), 0, 0>>>(
-        //    in_nnz, stride_x, stride_y, stride_z, in_coords_ptr, ocoords_code_ptr
-        //);
         coordsDownsampleExpand<3259, 4><<<DIV_UP(in_nnz, 4), dim3(4, 4, 1), 0, 0>>>(
             in_nnz, k_vol, k_size_x, k_size_y, k_size_z, t_stride_x, t_stride_y, t_stride_z, 
-            stride_x, stride_y, stride_z, in_coords_ptr, ocoords_code_ptr
+            l_stride_x, l_stride_y, l_stride_z, padding_x, padding_y, padding_z, 
+            min_x, min_y, min_z, max_x, max_y, max_z, 
+            in_coords_ptr, ocoords_code_ptr
         );
 
         // extract the valid output coords code
@@ -176,11 +186,19 @@ at::Tensor HashMap(
     );
 
     // query input id from output id 
-    queryHash_wholemap<16, 4><<<DIV_UP(out_nnz, 16), dim3(4, 16), 0, 0>>>(
-        in_nnz, out_nnz, table_size, out_coords_ptr, k_size_x, k_size_y, k_size_z, k_vol, 
-        t_stride_x, t_stride_y, t_stride_z, value_ptr, 
-        index_ptr, imap_ptr, omap_ptr, knnz_ptr, separate_mid
-    );
+    if (separate_mid){
+        _queryhash_subm_gather_mm_scatter<16, 4><<<DIV_UP(out_nnz, 16), dim3(4, 16), 0, 0>>>(
+            in_nnz, out_nnz, table_size, out_coords_ptr, k_size_x, k_size_y, k_size_z, k_vol, 
+            value_ptr, index_ptr, imap_ptr, omap_ptr, knnz_ptr, separate_mid
+        );
+    }
+    else{
+        _queryhash_sp_gather_mm_scatter<16, 4><<<DIV_UP(out_nnz, 16), dim3(4, 16), 0, 0>>>(
+            in_nnz, out_nnz, table_size, out_coords_ptr, k_size_x, k_size_y, k_size_z, k_vol, 
+            l_stride_x, l_stride_y, l_stride_z, padding_x, padding_y, padding_z, value_ptr, 
+            index_ptr, imap_ptr, omap_ptr, knnz_ptr, separate_mid
+        );
+    }
 
     exclusive_scan_for_kernel_quantified<<<1, k_vol, 0, 0>>>(
         k_vol + 1, knnz_ptr, 128, kpos_ptr, qkpos_ptr
@@ -246,6 +264,13 @@ at::Tensor HashMap_simple(
                 const int c_out, 
                 const int l_stride_code, 
                 const int t_stride_code, 
+                const int padding_code, 
+                const int min_x,
+                const int min_y,
+                const int min_z,
+                const int max_x,
+                const int max_y,
+                const int max_z,
                 at::Tensor map,
                 at::Tensor kernel_nnz,
                 at::Tensor kernel_pos,
@@ -279,6 +304,10 @@ at::Tensor HashMap_simple(
     int k_size_x = k_size_code / 94273;
     int k_size_y = (k_size_code - k_size_x * 94273) / 311;
     int k_size_z = k_size_code - k_size_x * 94273 - k_size_y * 311;
+
+    int padding_x = padding_code / 94273;
+    int padding_y = (padding_code - padding_x * 94273) / 311;
+    int padding_z = padding_code - padding_x * 94273 - padding_y * 311;
 
     /********************************************************************/
     // default stream
@@ -337,12 +366,11 @@ at::Tensor HashMap_simple(
 
         int64_t *ocoords_code_ptr = ocoords_code_space.data_ptr<int64_t>(); 
 
-        // coordsDownsample<3041><<<DIV_UP(in_nnz, 16), dim3(16, 1, 1), 0, 0>>>(
-        //    in_nnz, stride_x, stride_y, stride_z, in_coords_ptr, ocoords_code_ptr
-        //);
-        coordsDownsampleExpand<3259, 4><<<DIV_UP(in_nnz, 4), dim3(4, 4), 0, 0>>>(
+        coordsDownsampleExpand<3259, 4><<<DIV_UP(in_nnz, 4), dim3(4, 4, 1), 0, 0>>>(
             in_nnz, k_vol, k_size_x, k_size_y, k_size_z, t_stride_x, t_stride_y, t_stride_z, 
-            stride_x, stride_y, stride_z, in_coords_ptr, ocoords_code_ptr
+            l_stride_x, l_stride_y, l_stride_z, padding_x, padding_y, padding_z, 
+            min_x, min_y, min_z, max_x, max_y, max_z, 
+            in_coords_ptr, ocoords_code_ptr
         );
 
         // extract the valid output coords code
@@ -383,11 +411,19 @@ at::Tensor HashMap_simple(
     // printf("insertVal done.");
 
     // query input id from output id 
-    queryHash_simple<16, 4><<<DIV_UP(out_nnz, 16), dim3(4, 16), 0, 0>>>(
-        in_nnz, out_nnz, table_size, out_coords_ptr, k_size_x, k_size_y, k_size_z, k_vol, 
-        t_stride_x, t_stride_y, t_stride_z, value_ptr, 
-        index_ptr, map_ptr, knnz_ptr, separate_mid
-    );
+    if (separate_mid){
+        _queryhash_subm_fetch_on_demand<16, 4><<<DIV_UP(out_nnz, 16), dim3(4, 16), 0, 0>>>(
+            in_nnz, out_nnz, table_size, out_coords_ptr, k_size_x, k_size_y, k_size_z, k_vol, 
+            value_ptr, index_ptr, map_ptr, knnz_ptr, separate_mid
+        );
+    }
+    else{
+        _queryhash_sp_fetch_on_demand<16, 4><<<DIV_UP(out_nnz, 16), dim3(4, 16), 0, 0>>>(
+            in_nnz, out_nnz, table_size, out_coords_ptr, k_size_x, k_size_y, k_size_z, k_vol, 
+            l_stride_x, l_stride_y, l_stride_z, padding_x, padding_y, padding_z, value_ptr, 
+            index_ptr, map_ptr, knnz_ptr, separate_mid
+        );
+    }
 
     // printf("queryHash done.");
 
