@@ -1,5 +1,5 @@
 # PCEngine(v2.0.0) Development
-PCEngine(v2.0.0) contains both `Gather-MM-Scatter` and `Fetch-on-Demand` dataflows. Compared to PCEngine(v1.x), PCEngine is faster and more functional. In v2.0.0, MMs in both dataflows are implemented using `block fusion technique`. 
+PCEngine(v2.0.0) contains both `Gather-MM-Scatter` and `Fetch-on-Demand` dataflows. Compared to PCEngine(v1.x), PCEngine is faster and more functional. In v2.0.0, both dataflows are implemented using `indicator-assisted fusion technique`. 
 
 ## Current Constraints 
 1. Gather-MM-Scatter dataflow: channel size % 2 == 0.
@@ -15,7 +15,7 @@ PCEngine(v2.0.0) contains both `Gather-MM-Scatter` and `Fetch-on-Demand` dataflo
 `python3 setup.py install`
 
 ## Guide
-**Correctness Validation**
+**Correctness Validation** (Not ready yet)
 
 `python3 results.py --dataflow={'D1', 'D2'}`
 
