@@ -3,6 +3,7 @@ PCEngine is an efficient **Engine** for sparse convolution inference in 3D **P**
 
 ## **News**
 [2023.06.02] The backward kernels in Fetch-on-Demand dataflow will be merged into the framework soon.
+[2023.06.19] Foward path in Fetch-on-Demand dataflow has been merged into [TorchSparse](https://github.com/mit-han-lab/torchsparse).
 
 ## **Requirements**
 ``` 
